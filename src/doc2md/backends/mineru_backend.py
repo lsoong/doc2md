@@ -29,6 +29,16 @@ class MinerUBackend(Backend):
     install_hint = "pip install 'mineru[core]'"
     priority = 90
     requires = ()
+    license = "MinerU Open Source License (Apache-2.0 기반 + 추가 조건)"
+    weights_license = "AGPL-3.0 (HuggingFace 모델 카드 기준)"
+    license_note = (
+        "코드는 2.x 에서 AGPL-3.0 → 자체 라이선스로 바뀌어 사내 사용에 제약이 없다"
+        "(MAU 1억·월매출 2천만 달러 초과 시 별도 계약, 외부 서비스면 MinerU 사용 표기). "
+        "다만 모델 가중치는 아직 AGPL 표기라 사외 배포 시 검토가 필요하다."
+    )
+    license_copyleft = True
+    license_verdict = "사내 사용 가능 · 가중치 AGPL 표기라 배포 검토"
+    license_url = "https://github.com/opendatalab/MinerU/blob/master/LICENSE.md"
     llm_hooks = (
         LLMHook(
             "vlm-http-client",

@@ -19,7 +19,7 @@ uv venv .venv && source .venv/bin/activate
 uv pip install -e '.[basic]'        # markitdown + pymupdf4llm (가볍다)
 uv pip install -e '.[all]'          # + docling (권장, torch 포함 ~2GB)
 uv pip install 'mineru[core]'       # 정확도 최상위 엔진 (선택)
-uv pip install marker-pdf           # 배치 처리량 최고 엔진 (선택)
+uv pip install 'marker-pdf>=2.0'    # 배치 처리량 최고 엔진 (선택, 1.x 는 GPL 이라 제외)
 ```
 
 엔진은 **설치된 것만 활성화**된다. 확인:
@@ -33,9 +33,9 @@ doc2md engines -f pdf   # pdf 를 지원하는 엔진만
 
 | 엔진 | 강점 | 대상 포맷 | 내장 LLM 연결(`--llm-mode`) | 비고 |
 |---|---|---|---|---|
-| `mineru` | 정확도 최상위(OmniDocBench), 수식·복잡 표 | pdf, 이미지 | `vlm-http-client` / `vlm-transformers` | AGPL, 무겁다 |
+| `mineru` | 정확도 최상위(OmniDocBench), 수식·복잡 표 | pdf, 이미지 | `vlm-http-client` / `vlm-transformers` | 무겁다, 가중치 AGPL |
 | `docling` | PDF·Office 를 한 파이프라인으로, MIT | pdf docx pptx xlsx html 이미지 | `vlm` / `picture` | **기본 주력** |
-| `marker` | 배치 처리량, 수식·코드 | pdf docx pptx xlsx epub | `refine` | GPL+상용조항 |
+| `marker` | 배치 처리량, 수식·코드 | pdf docx pptx xlsx epub | `refine` | 2.0+ Apache, 가중치 규모조건 |
 | `vlm` | 스캔본·도장·수기 주석. 사내 비전 모델이 직접 읽는다 | pdf, 이미지 | `page` (엔진 자체가 LLM) | 페이지당 GPU 시간 |
 | `pymupdf4llm` | 압도적으로 빠름(텍스트 레이어 PDF) | pdf epub 등 | — (`--refine` 으로 대체) | AGPL |
 | `markitdown` | 포맷 커버리지 최광, 폴백 | 거의 모든 포맷 | `caption` | PDF 구조 보존 약함 |
@@ -65,6 +65,7 @@ doc2md convert 보고서.pdf --stdout | less        # 표준출력으로
 ```bash
 doc2md config init                     # ~/.config/doc2md/config.toml 템플릿 생성
 doc2md config show                     # 지금 적용되는 설정 확인 (키는 가려짐)
+doc2md profiles                        # 등록해 둔 사내 모델 목록
 doc2md models                          # 게이트웨이가 주는 모델 목록
 doc2md convert 보고서.pdf --refine --pick-model      # 모델을 골라서 결과 정제
 doc2md convert 스캔본.pdf -e vlm -m corp-vl-32b      # 비전 모델로 직접 변환
@@ -95,9 +96,53 @@ max_pages = 0                         # 0 = 제한 없음
 
 환경변수로도 덮어쓸 수 있다(설정파일보다 우선):
 `DOC2MD_BASE_URL`, `DOC2MD_API_KEY`, `DOC2MD_MODEL`, `DOC2MD_VISION_MODEL`, `DOC2MD_ENGINE`,
-`DOC2MD_CONFIG`.
+`DOC2MD_PROFILE`, `DOC2MD_CONFIG`.
 
 지금 설정이 어디를 보고 있는지는 `doc2md config show` 의 "엔드포인트 검사" 줄로 확인한다.
+
+### 사내 모델이 여러 개일 때 — 프로필
+
+사내에 모델이 여럿이면 미리 등록해 두고 `--profile`(`-P`)로 골라 쓴다. 각 프로필은 `[llm]` 의
+공통값을 상속하므로 **달라지는 것만** 적으면 된다.
+
+```toml
+default_profile = "fast"              # --profile 을 생략했을 때 쓸 프로필
+
+[llm]                                 # 모든 프로필이 공유하는 공통값
+base_url = "https://llm-gw.example.corp/v1"
+api_key = "env:CORP_LLM_API_KEY"
+timeout = 180.0
+
+[llm.profiles.fast]
+description = "일반 문서용 경량 모델"
+model = "corp-llm-8b"
+vision_model = "corp-vl-8b"
+
+[llm.profiles.accurate]
+description = "표·수식 많은 문서용"
+model = "corp-llm-72b"
+vision_model = "corp-vl-32b"
+timeout = 600.0
+
+[llm.profiles.local]
+description = "노트북 Ollama"
+base_url = "http://127.0.0.1:11434/v1"   # 게이트웨이가 다르면 여기서 덮어쓴다
+api_key = ""
+model = "gemma3:27b"
+```
+
+```bash
+doc2md profiles                                  # 등록된 프로필 표 (● = 지금 선택된 것)
+doc2md profiles --check                          # 프로필마다 실제로 접속해 본다
+doc2md convert 보고서.pdf --refine -P accurate    # 이 변환만 정확도 모델로
+doc2md compare 보고서.pdf --judge -P accurate     # 심사만 큰 모델에게
+DOC2MD_PROFILE=local doc2md convert 보고서.pdf --refine
+```
+
+고르는 순서는 `--profile` > `$DOC2MD_PROFILE` > `default_profile` > (프로필이 하나뿐이면
+그것) > `[llm]`. 프로필 이름을 틀리면 등록된 목록을 보여 주며 변환 전에 멈춘다.
+`--model`·`--base-url` 같은 개별 인자와 `DOC2MD_*` 환경변수는 고른 프로필 위에 덮어쓴다.
+프로필 주소도 **사내 자체 서빙 검사**를 똑같이 통과해야 한다.
 
 `--refine` 은 결과를 조각내서 사내 모델에 보내 깨진 표 복원·잘린 줄 병합·쪽번호 제거를 시킨다.
 프롬프트가 "내용을 만들어내지 말 것"을 강제하지만, **모델이 손댄 결과이므로 중요한 문서는**
@@ -175,7 +220,7 @@ doc2md compare 보고서.pdf --json          # 지표를 JSON 으로 (CI·집계
 
 ```bash
 python tests/make_samples.py tests/samples     # 한국어 샘플 docx/pptx/xlsx/pdf/png 생성
-python -m pytest tests -q                      # 테스트 (54개)
+python -m pytest tests -q                      # 테스트 (68개)
 python tests/stub_gateway.py 8777              # 사내 게이트웨이 흉내 서버
 DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
 ```
@@ -202,8 +247,9 @@ DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
   (docling 기준 수백 MB, 1~2분). 폐쇄망이면 `~/.cache/huggingface` 를 미리 옮겨 둔다.
 - **스캔 PDF** 는 텍스트 레이어가 없어 대부분 엔진이 빈 결과를 낸다. 경고가 뜨면
   `[engines.docling] ocr = true` 로 켜거나 `-e vlm` 을 쓴다.
-- **라이선스**: mineru·pymupdf4llm 은 AGPL, marker 는 GPL+상용 조항이다. 사내 내부 도구로는
-  문제없지만 외부 배포 제품에 넣으려면 검토가 필요하다. 기본 설치는 MIT 계열만 쓴다.
+- **라이선스**: 사내 내부 도구로는 여섯 엔진 모두 그대로 쓸 수 있다. 사외 배포·사외
+  서비스라면 AGPL 인 `pymupdf4llm`·`vlm`(과 MinerU 가중치)만 빼면 된다. `doc2md licenses`
+  로 요약을 보고, 근거와 판단은 [docs/licenses.md](docs/licenses.md).
 - **사외 SaaS 파서(LlamaParse·Mathpix 등)는 의도적으로 넣지 않았다.** 사내 문서가 외부로
   나가기 때문이다.
 - **외부 상용 LLM 연결도 같은 이유로 막혀 있다.** `api.openai.com`, `api.anthropic.com`,
@@ -216,4 +262,4 @@ DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
 ## 라이선스
 
 이 저장소의 코드는 MIT([LICENSE](LICENSE)). 선택 설치하는 변환 엔진들은 각자의 라이선스를
-따른다(위 "알아 둘 것" 참고).
+따르고, 전수 점검 결과는 [docs/licenses.md](docs/licenses.md) 에 있다 (`doc2md licenses`).

@@ -74,6 +74,20 @@ class Backend(ABC):
     # 엔진에 내장된 LLM 연결 방식들. 비어 있으면 --engine-llm 을 못 쓴다.
     llm_hooks: tuple[LLMHook, ...] = ()
 
+    # ---- 라이선스 (doc2md licenses / docs/licenses.md) ----
+    # 엔진 코드의 라이선스
+    license: str = ""
+    # 엔진이 내려받는 모델 가중치의 라이선스. 코드와 다를 때만 채운다.
+    weights_license: str = ""
+    # 사내 사용·배포 시 주의할 점 한 줄
+    license_note: str = ""
+    # 카피레프트(GPL/AGPL) 계열이라 배포 전 검토가 필요한가
+    license_copyleft: bool = False
+    # 사내 사용 판정 한 줄 (doc2md licenses 표)
+    license_verdict: str = "제약 없음"
+    # 근거 문서
+    license_url: str = ""
+
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or Config()
         self.options: dict[str, Any] = dict(self.cfg.engine_options.get(self.name, {}))

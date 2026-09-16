@@ -46,9 +46,17 @@ class MarkerBackend(Backend):
     name = "marker"
     title = "Marker (datalab)"
     extensions = (".pdf", ".docx", ".pptx", ".xlsx", ".epub", ".html")
-    install_hint = "pip install marker-pdf"
+    install_hint = "pip install 'marker-pdf>=2.0'"
     priority = 70
     requires = ("marker",)
+    license = "Apache-2.0 (2.0 이상. 1.x 는 GPL-3.0-or-later)"
+    weights_license = "수정 AI Pubs Open RAIL-M — 매출·투자 5백만 달러 미만만 무상"
+    license_note = (
+        "반드시 2.0 이상을 쓴다 — 1.x 는 GPL-3.0 이라 사외 배포 시 전염된다. "
+        "가중치는 회사 규모가 5백만 달러 기준을 넘으면 datalab 상용 라이선스가 필요하다."
+    )
+    license_verdict = "사내 사용 가능 · 2.0 이상 필수 · 가중치 규모 조건"
+    license_url = "https://github.com/datalab-to/marker/blob/master/LICENSE"
     llm_hooks = (
         LLMHook(
             "refine",

@@ -44,6 +44,12 @@ class MarkItDownBackend(Backend):
     install_hint = "pip install 'markitdown[all]'"
     priority = 20
     requires = ("markitdown",)
+    license = "MIT"
+    license_note = (
+        "제약 없음. 다만 [all] 로 딸려오는 선택 의존성은 별도 확인이 필요하다"
+        "(현재 설치본 기준 모두 MIT·BSD·Apache 계열)."
+    )
+    license_url = "https://github.com/microsoft/markitdown/blob/main/LICENSE"
     llm_hooks = (
         LLMHook(
             "caption",

@@ -27,6 +27,14 @@ class VLMBackend(Backend):
     priority = 50
     requires = ("pymupdf",)
     needs_llm = True
+    license = "doc2md 자체 코드(MIT) + PyMuPDF(AGPL-3.0)"
+    license_note = (
+        "페이지 렌더링에 PyMuPDF 를 쓰므로 pymupdf4llm 과 같은 AGPL 조건이 걸린다. "
+        "변환 품질은 사내 비전 모델에 달려 있고, 그 모델의 라이선스는 별도로 확인해야 한다."
+    )
+    license_copyleft = True
+    license_verdict = "사내 사용 가능 · 사외 배포/서비스면 AGPL 검토"
+    license_url = "https://pymupdf.readthedocs.io/en/latest/about.html#license-and-copyright"
     llm_hooks = (
         LLMHook(
             "page",

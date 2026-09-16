@@ -255,6 +255,176 @@ def test_llm_client_requires_base_url_and_model():
         LLMClient(LLMConfig())
 
 
+# ------------------------------------------------------- 사내 모델 프로필
+PROFILE_CONFIG = """\
+default_profile = "fast"
+
+[llm]
+base_url = "https://gw.example/v1"
+api_key = "env:MY_KEY"
+model = "공통-32b"
+timeout = 180.0
+
+[llm.profiles.fast]
+description = "빠른 모델"
+model = "corp-llm-8b"
+
+[llm.profiles.accurate]
+model = "corp-llm-72b"
+vision_model = "corp-vl-32b"
+timeout = 600.0
+
+[llm.profiles.local]
+base_url = "http://127.0.0.1:11434/v1"
+api_key = ""
+model = "gemma3:27b"
+"""
+
+
+def write_profiles(tmp_path) -> Path:
+    path = tmp_path / "doc2md.toml"
+    path.write_text(PROFILE_CONFIG, encoding="utf-8")
+    return path
+
+
+def test_profiles_inherit_common_llm_section(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    monkeypatch.setenv("MY_KEY", "from-env")
+    cfg = load_config(write_profiles(tmp_path))
+    assert set(cfg.profiles) == {"fast", "accurate", "local"}
+    # [llm] 의 공통값을 물려받는다
+    assert cfg.profiles["accurate"].base_url == "https://gw.example/v1"
+    assert cfg.profiles["accurate"].timeout == 600.0  # 프로필이 덮어쓴 값
+    assert cfg.profiles["fast"].timeout == 180.0
+    # 프로필이 명시한 값은 그대로
+    assert cfg.profiles["local"].base_url == "http://127.0.0.1:11434/v1"
+    assert cfg.profiles["local"].api_key == ""
+
+
+def test_default_profile_is_selected_when_not_asked(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    monkeypatch.setenv("MY_KEY", "from-env")
+    cfg = load_config(write_profiles(tmp_path))
+    assert cfg.active_profile == "fast"
+    assert cfg.llm.model == "corp-llm-8b"
+    assert cfg.llm.api_key == "from-env"  # env: 참조는 선택 후에도 풀린다
+
+
+def test_profile_selection_order_cli_beats_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_KEY", "k")
+    monkeypatch.setenv("DOC2MD_PROFILE", "local")
+    cfg = load_config(write_profiles(tmp_path))
+    assert cfg.active_profile == "local"
+    # CLI 인자가 환경변수를 이긴다
+    cfg = load_config(write_profiles(tmp_path), profile="accurate")
+    assert cfg.active_profile == "accurate"
+    assert cfg.llm.model == "corp-llm-72b"
+    assert cfg.llm.effective_vision_model == "corp-vl-32b"
+
+
+def test_unknown_profile_lists_the_known_ones(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    with pytest.raises(ConfigError, match="accurate"):
+        load_config(write_profiles(tmp_path), profile="없는프로필")
+
+
+def test_default_profile_must_exist(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    path = tmp_path / "doc2md.toml"
+    path.write_text(
+        'default_profile = "오타"\n[llm]\nbase_url = "https://gw/v1"\n'
+        '[llm.profiles.fast]\nmodel = "a"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="default_profile"):
+        load_config(path)
+
+
+def test_single_profile_is_used_without_default_profile(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    path = tmp_path / "doc2md.toml"
+    path.write_text(
+        '[llm]\nbase_url = "https://gw/v1"\n[llm.profiles.only]\nmodel = "a"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.active_profile == "only"
+    assert cfg.llm.model == "a"
+
+
+def test_profile_rejects_unknown_key_and_external_host(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    path = tmp_path / "doc2md.toml"
+    path.write_text(
+        '[llm]\nbase_url = "https://gw/v1"\n[llm.profiles.bad]\nnope = 1\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=r"llm.profiles.bad"):
+        load_config(path)
+
+    path.write_text(
+        '[llm]\nbase_url = "https://gw/v1"\nmodel = "a"\n'
+        '[llm.profiles.bad]\nbase_url = "https://api.openai.com/v1"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(path, profile="bad")
+    with pytest.raises(ConfigError, match="외부 상용 LLM API"):
+        cfg.llm.require()
+
+
+def test_selecting_profile_does_not_mutate_the_registry(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    monkeypatch.setenv("MY_KEY", "k")
+    monkeypatch.setenv("DOC2MD_MODEL", "환경변수-모델")
+    cfg = load_config(write_profiles(tmp_path), profile="fast")
+    assert cfg.llm.model == "환경변수-모델"  # 환경변수가 프로필을 이긴다
+    assert cfg.profiles["fast"].model == "corp-llm-8b"  # 등록된 원본은 그대로
+
+
+def test_top_level_profiles_section_is_rejected(tmp_path):
+    path = tmp_path / "doc2md.toml"
+    path.write_text('[profiles.fast]\nmodel = "a"\n', encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"llm.profiles"):
+        load_config(path)
+
+
+def test_api_key_status_never_shows_the_key(tmp_path, monkeypatch):
+    from doc2md.config import api_key_status
+
+    monkeypatch.setenv("MY_KEY", "s3cret")
+    assert api_key_status(LLMConfig(api_key="env:MY_KEY")) == "MY_KEY 설정됨"
+    monkeypatch.delenv("MY_KEY")
+    assert api_key_status(LLMConfig(api_key="env:MY_KEY")) == "MY_KEY 미설정"
+    assert api_key_status(LLMConfig(api_key="s3cret")) == "설정됨"
+    assert api_key_status(LLMConfig()) == "(미설정)"
+
+
+def test_sample_config_is_loadable_and_has_profiles(tmp_path, monkeypatch):
+    from doc2md.config import SAMPLE_CONFIG
+
+    monkeypatch.delenv("DOC2MD_PROFILE", raising=False)
+    path = tmp_path / "doc2md.toml"
+    path.write_text(SAMPLE_CONFIG, encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.active_profile == "fast"
+    assert len(cfg.profiles) >= 2
+
+
+# --------------------------------------------------------------- 라이선스
+def test_every_engine_declares_a_license():
+    for cls in ENGINES.values():
+        assert cls.license, f"{cls.name} 에 라이선스 표기가 없습니다"
+        assert cls.license_note, f"{cls.name} 에 라이선스 주의사항이 없습니다"
+        if cls.license_copyleft:
+            assert cls.license_verdict != "제약 없음"
+
+
+def test_copyleft_engines_are_flagged():
+    flagged = {name for name, cls in ENGINES.items() if cls.license_copyleft}
+    # AGPL 계열(PyMuPDF 기반 둘 + MinerU 가중치)은 반드시 표시돼야 한다
+    assert {"pymupdf4llm", "vlm", "mineru"} <= flagged
+    assert "docling" not in flagged and "markitdown" not in flagged
+
+
 # ----------------------------------------------------------------- 실제 변환
 @pytest.mark.skipif(not SAMPLES.exists(), reason="샘플 문서 없음")
 @pytest.mark.parametrize("name", ["sample.docx", "sample.pptx", "sample.xlsx"])

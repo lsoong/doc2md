@@ -13,17 +13,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 라이선스 주의: pymupdf 계열은 AGPL-3.0(듀얼) 이고 marker 가중치에는 규모 조건이 있다.
+# 사내 사용은 모두 문제없지만 사외 배포·서비스 전에 docs/licenses.md 를 볼 것.
+
 # 기본 엔진 — 가볍고 의존성이 적다. 설치를 권장한다.
 basic = [
     "markitdown[all]>=0.1.1",
-    "pymupdf4llm>=0.0.17",
+    "pymupdf4llm>=0.0.17",      # AGPL-3.0
+]
+# 허용적 라이선스(MIT)만으로 된 조합. 사외 배포를 염두에 둘 때 쓴다.
+permissive = [
+    "markitdown[all]>=0.1.1",
+    "docling>=2.0",
 ]
 # 고정확도 엔진 — torch 등 무거운 의존성이 딸려온다.
 docling = ["docling>=2.0"]
-marker = ["marker-pdf>=1.6"]
+# 2.0 부터 코드가 Apache-2.0 이다. 1.x 는 GPL-3.0 이므로 하한을 올려 둔다.
+marker = ["marker-pdf>=2.0"]
 mineru = ["mineru[core]>=2.0"]
 # VLM(비전 모델) 엔진 — 페이지를 이미지로 렌더링하려면 PyMuPDF가 필요하다.
-vlm = ["pymupdf>=1.24"]
+vlm = ["pymupdf>=1.24"]        # AGPL-3.0
 all = [
     "markitdown[all]>=0.1.1",
     "pymupdf4llm>=0.0.17",

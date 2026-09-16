@@ -49,6 +49,10 @@ class DoclingBackend(Backend):
     install_hint = "pip install docling"
     priority = 80
     requires = ("docling",)
+    license = "MIT"
+    weights_license = "CDLA-Permissive-2.0 / Apache-2.0 (ds4sd/docling-models)"
+    license_note = "코드·가중치 모두 허용적. 사내 사용·사외 배포 모두 제약이 사실상 없다."
+    license_url = "https://github.com/docling-project/docling/blob/main/LICENSE"
     llm_hooks = (
         LLMHook(
             "vlm",

@@ -6,9 +6,9 @@ doc2md 가 어떤 엔진을 왜 골랐는지 기록. SYA-31 산출물.
 
 | 도구 | 라이선스 | 방식 | PDF | Office | 비고 |
 |---|---|---|---|---|---|
-| **MinerU** (OpenDataLab) | AGPL-3.0 | 레이아웃 모델 + 수식/표 전용 모델, VLM 백엔드 옵션 | ◎ | △(2.x부터 일부) | OmniDocBench 공개 점수 최상위 |
+| **MinerU** (OpenDataLab) | MinerU OSL(Apache 기반)·가중치 AGPL | 레이아웃 모델 + 수식/표 전용 모델, VLM 백엔드 옵션 | ◎ | △(2.x부터 일부) | OmniDocBench 공개 점수 최상위 |
 | **Docling** (IBM Research) | MIT | 레이아웃 모델 + TableFormer | ◎ | ◎ | PDF·Office 를 한 파이프라인으로 |
-| **Marker** (datalab) | GPL-3.0 + 상용 조항 | Surya OCR + 레이아웃 | ◎ | ○ | 배치 처리량·수식 강점, `--use_llm` 옵션 |
+| **Marker** (datalab) | 2.0+ Apache-2.0·가중치 RAIL-M | Surya OCR + 레이아웃 | ◎ | ○ | 배치 처리량·수식 강점, `--use_llm` 옵션 |
 | **MarkItDown** (Microsoft) | MIT | 포맷별 파서(텍스트 추출) | △ | ◎ | 매우 빠름, 포맷 커버리지 최광 |
 | **PyMuPDF4LLM** | AGPL-3.0 | PyMuPDF 텍스트/표 추출 | ○ | ✕ | 압도적으로 빠름(페이지당 수십 ms) |
 | **Unstructured** | Apache-2.0 | 하이브리드 | ○ | ○ | 요소 단위 출력, Markdown 은 부차적 |
@@ -46,10 +46,11 @@ OmniDocBench(CVPR 2025, 1,651페이지 / 10개 문서 유형 / 다국어)가 사
 제외: Pandoc(PDF 입력 불가), Unstructured(Markdown 품질이 위 셋보다 낮음),
 LlamaParse·Mathpix(사외 전송 — 사내 문서 반출 금지).
 
-라이선스 주의: **MinerU(AGPL)**, **PyMuPDF4LLM(AGPL)**, **Marker(GPL + 상용 조항)** 는
-사내 내부 도구로 쓰는 데는 문제가 없지만, 이 코드를 외부에 배포하는 제품에 넣으려면
-라이선스 검토가 필요하다. doc2md 본체는 이들을 **선택적 의존성**으로만 두고 직접 링크하지
-않는다(기본 설치는 MIT 인 Docling·MarkItDown).
+라이선스: 2026-09-16 전수 점검 결과 **사내 내부 도구로는 여섯 엔진 모두 그대로 쓸 수 있다.**
+단 **PyMuPDF4LLM·vlm(AGPL-3.0)**, **MinerU 가중치(AGPL 표기)**, **Marker 1.x(GPL-3.0)** 는
+사외 배포·사외 서비스 시나리오에서 걸린다. 점검 중 두 가지가 최신 사실로 갱신됐다 —
+Marker 는 2.0 부터 코드가 Apache-2.0 이고(1.x 는 GPL), MinerU 는 AGPLv3 에서 Apache 기반
+자체 라이선스로 옮겼다. 상세 판단·근거·재확인 명령은 [licenses.md](licenses.md).
 
 ## 4. 사내 모델을 어디에 쓰나
 

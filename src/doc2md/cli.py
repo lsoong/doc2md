@@ -1,6 +1,8 @@
 """doc2md 커맨드라인.
 
   doc2md engines                      설치된 엔진과 지원 포맷 확인
+  doc2md profiles                     등록해 둔 사내 모델 목록
+  doc2md licenses                     엔진 라이선스 점검
   doc2md models                       사내 게이트웨이의 모델 목록
   doc2md convert 보고서.pdf -e docling  변환
   doc2md compare 보고서.pdf            엔진별로 변환해 비교
@@ -30,10 +32,12 @@ from .config import (
     SAMPLE_CONFIG,
     USER_CONFIG_PATH,
     ConfigError,
+    api_key_status,
     ensure_self_hosted,
     is_external_llm_host,
     load_config,
     override_llm,
+    ready_llm,
     set_engine_options,
 )
 from .llm import JUDGE_PROMPT, JUDGE_SYSTEM, LLMClient, LLMError
@@ -57,14 +61,20 @@ def _fail(message: str) -> "typer.Exit":
     return typer.Exit(code=1)
 
 
+PROFILE_OPTION = typer.Option(
+    None, "--profile", "-P", help="쓸 사내 모델 프로필 (doc2md profiles 로 목록 확인)"
+)
+
+
 def _load(
     config: str | None,
     base_url: str | None,
     model: str | None,
     vision_model: str | None = None,
+    profile: str | None = None,
 ):
     try:
-        cfg = load_config(config)
+        cfg = load_config(config, profile=profile)
     except ConfigError as exc:
         raise _fail(str(exc)) from exc
     return override_llm(cfg, base_url=base_url, model=model, vision_model=vision_model)
@@ -179,16 +189,60 @@ def engines(
     )
 
 
+# -------------------------------------------------------------------- licenses
+@app.command()
+def licenses(
+    installed_only: bool = typer.Option(
+        False, "--installed", help="지금 설치된 엔진만 본다"
+    ),
+) -> None:
+    """엔진별 라이선스와 사용 조건을 보여 준다 (자세한 검토는 docs/licenses.md)."""
+    table = Table(title="엔진 라이선스 (doc2md 본체는 MIT)")
+    table.add_column("엔진", style="bold")
+    table.add_column("설치", justify="center")
+    table.add_column("코드")
+    table.add_column("모델 가중치")
+    table.add_column("판정")
+    ordered = sorted(ENGINE_CLASSES, key=lambda c: c.priority, reverse=True)
+    for cls in ordered:
+        available = cls.is_available()
+        if installed_only and not available:
+            continue
+        table.add_row(
+            cls.name,
+            "[green]●[/]" if available else "[dim]—[/]",
+            ("[yellow]" + cls.license + "[/]") if cls.license_copyleft else cls.license,
+            cls.weights_license or "[dim]코드와 동일[/]",
+            cls.license_verdict
+            if cls.license_verdict == "제약 없음"
+            else f"[yellow]{cls.license_verdict}[/]",
+        )
+    console.print(table)
+    for cls in ordered:
+        if installed_only and not cls.is_available():
+            continue
+        if cls.license_note:
+            console.print(f"[bold]{cls.name}[/] — {escape(cls.license_note)}")
+            if cls.license_url:
+                console.print(f"  [dim]{cls.license_url}[/]")
+    console.print(
+        "\n[bold]요약[/] 사내에서 내부 문서를 변환하는 용도로는 여섯 엔진 모두 그대로 쓸 수 있다.\n"
+        "외부 배포·사외 서비스 제공은 [yellow]노란색 표시 엔진[/]을 빼거나 별도 검토가 필요하다.\n"
+        "[dim]자세한 근거와 판단은 docs/licenses.md.[/]"
+    )
+
+
 # ---------------------------------------------------------------------- models
 @app.command()
 def models(
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
+    profile: str = PROFILE_OPTION,
     base_url: str = typer.Option(
         None, "--base-url", help="사내 게이트웨이 주소 (OpenAI 호환, 자체 서빙)"
     ),
 ) -> None:
     """사내 게이트웨이가 제공하는 모델 목록을 조회한다."""
-    cfg = _load(config, base_url, None)
+    cfg = _load(config, base_url, None, profile=profile)
     if not cfg.llm.base_url:
         raise _fail("base_url 이 비어 있습니다. doc2md config init 으로 설정하세요.")
     try:
@@ -199,7 +253,10 @@ def models(
     if not found:
         console.print("[yellow]게이트웨이가 모델 목록을 돌려주지 않았습니다.[/] --model 로 직접 지정하세요.")
         return
-    table = Table(title=f"사내 모델 ({cfg.llm.base_url})")
+    title = f"사내 모델 ({cfg.llm.base_url})"
+    if cfg.active_profile:
+        title += f" — 프로필 {cfg.active_profile}"
+    table = Table(title=title)
     table.add_column("#", justify="right")
     table.add_column("모델 ID")
     table.add_column("현재 설정")
@@ -211,6 +268,71 @@ def models(
             marks.append("비전")
         table.add_row(str(index), name, ", ".join(marks))
     console.print(table)
+
+
+# -------------------------------------------------------------------- profiles
+@app.command()
+def profiles(
+    config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
+    check: bool = typer.Option(False, "--check", help="프로필마다 실제로 접속해 본다"),
+) -> None:
+    """설정파일에 등록해 둔 사내 모델 프로필을 보여 준다."""
+    cfg = _load(config, None, None)
+    if not cfg.profiles:
+        console.print(
+            "[yellow]등록된 프로필이 없습니다.[/]\n"
+            f"  설정파일에 {escape('[llm.profiles.<이름>]')} 을 추가하면 "
+            "--profile 로 골라 쓸 수 있습니다.\n"
+            f"  템플릿: doc2md config init  (기본 위치 {USER_CONFIG_PATH})"
+        )
+        if cfg.llm.base_url:
+            console.print(
+                f"  현재는 {escape('[llm]')} 하나만 씁니다: {cfg.llm.base_url} / {cfg.llm.model}"
+            )
+        return
+
+    table = Table(title=f"사내 모델 프로필 ({cfg.source_path})")
+    table.add_column("", justify="center")
+    table.add_column("이름", style="bold")
+    table.add_column("설명")
+    table.add_column("base_url")
+    table.add_column("model")
+    table.add_column("vision_model")
+    table.add_column("API 키")
+    if check:
+        table.add_column("연결")
+    for name, llm in cfg.profiles.items():
+        mark = "●" if name == cfg.active_profile else ""
+        row = [
+            mark,
+            name,
+            llm.description or "[dim]—[/]",
+            llm.base_url or "[dim](미설정)[/]",
+            llm.model or "[dim](미설정)[/]",
+            llm.effective_vision_model or "[dim](미설정)[/]",
+            api_key_status(llm),
+        ]
+        if check:
+            row.append(_probe(llm))
+        table.add_row(*row)
+    console.print(table)
+    console.print(
+        "● = 지금 선택된 프로필. 고르는 순서: --profile > $DOC2MD_PROFILE > default_profile"
+        f"{' (' + cfg.default_profile + ')' if cfg.default_profile else ''}.\n"
+        "[dim]모든 프로필은 사내 자체 서빙 주소만 허용됩니다 — 과금되는 외부 API 는 거부됩니다.[/]"
+    )
+
+
+def _probe(llm) -> str:
+    """프로필 하나에 실제로 접속해 모델 목록을 받아 본다."""
+    try:
+        with LLMClient(ready_llm(llm)) as client:
+            found = client.list_models()
+    except (LLMError, ConfigError) as exc:
+        return f"[red]실패[/] {escape(str(exc).splitlines()[0][:60])}"
+    if llm.model and found and llm.model not in found:
+        return f"[yellow]연결됨, model 없음[/] ({len(found)}개 제공)"
+    return f"[green]연결됨[/] ({len(found)}개)" if found else "[green]연결됨[/]"
 
 
 def _pick_model(cfg, *, also_vision: bool = False) -> None:
@@ -253,6 +375,7 @@ def convert(
     llm_model: str = typer.Option(None, "--llm-model", help="엔진 내장 LLM 이 쓸 모델 ID"),
     llm_url: str = typer.Option(None, "--llm-url", help="엔진이 별도 추론 서버를 쓸 때의 주소 (mineru)"),
     pick_model: bool = typer.Option(False, "--pick-model", help="모델을 대화식으로 고른다"),
+    profile: str = PROFILE_OPTION,
     model: str = typer.Option(None, "--model", "-m", help="사내 모델 ID (정제용 기본 모델)"),
     vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
     base_url: str = typer.Option(
@@ -263,7 +386,9 @@ def convert(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="진행 메시지를 감춘다"),
 ) -> None:
     """문서를 Markdown 으로 변환한다."""
-    cfg = _load(config, base_url, model, vision_model)
+    cfg = _load(config, base_url, model, vision_model, profile=profile)
+    if not quiet and cfg.active_profile and (refine or engine_llm or engine == "vlm"):
+        err_console.print(f"[dim]사내 모델 프로필: {cfg.active_profile} ({cfg.llm.model})[/]")
     if pick_model:
         _pick_model(cfg, also_vision=engine_llm or engine == "vlm")
     if refine and not cfg.llm.model:
@@ -343,6 +468,7 @@ def compare(
     ),
     llm_mode: str = typer.Option(None, "--llm-mode", help="엔진 내장 LLM 의 연결 방식"),
     llm_model: str = typer.Option(None, "--llm-model", help="엔진 내장 LLM 이 쓸 모델 ID"),
+    profile: str = PROFILE_OPTION,
     model: str = typer.Option(None, "--model", "-m", help="심사에 쓸 사내 모델 ID"),
     vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
     base_url: str = typer.Option(
@@ -352,7 +478,7 @@ def compare(
     json_out: bool = typer.Option(False, "--json", help="지표를 JSON 으로 출력"),
 ) -> None:
     """같은 문서를 여러 엔진으로 변환해 결과를 비교한다."""
-    cfg = _load(config, base_url, model, vision_model)
+    cfg = _load(config, base_url, model, vision_model, profile=profile)
     if not path.is_file():
         raise _fail(f"파일이 없습니다: {path}")
 
@@ -491,14 +617,21 @@ def config_init(
 @config_app.command("show")
 def config_show(
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
+    profile: str = PROFILE_OPTION,
 ) -> None:
     """현재 적용되는 설정을 보여 준다 (API 키는 가린다)."""
-    cfg = _load(config, None, None)
+    cfg = _load(config, None, None, profile=profile)
     table = Table(title="현재 설정")
     table.add_column("항목", style="bold")
     table.add_column("값")
     table.add_row("설정파일", str(cfg.source_path or "(없음 — 환경변수/기본값만)"))
     table.add_row("default_engine", cfg.default_engine)
+    table.add_row(
+        "프로필",
+        f"{cfg.active_profile} (등록 {len(cfg.profiles)}개)"
+        if cfg.active_profile
+        else f"[dim](프로필 없이 {escape('[llm]')} 사용)[/]",
+    )
     table.add_row("llm.base_url", cfg.llm.base_url or "[dim](미설정)[/]")
     table.add_row("llm.api_key", "설정됨" if cfg.llm.api_key else "[dim](미설정)[/]")
     table.add_row("llm.model", cfg.llm.model or "[dim](미설정)[/]")

@@ -19,6 +19,14 @@ class PyMuPDFBackend(Backend):
     install_hint = "pip install pymupdf4llm"
     priority = 30
     requires = ("pymupdf4llm",)
+    license = "AGPL-3.0 (또는 Artifex 상용 라이선스)"
+    license_note = (
+        "사내 내부 도구로 쓰는 건 문제없지만, 이 엔진을 넣은 채 사외 배포하거나 "
+        "사외 이용자에게 웹 서비스로 제공하면 AGPL 제13조(소스 공개)가 걸린다."
+    )
+    license_copyleft = True
+    license_verdict = "사내 사용 가능 · 사외 배포/서비스면 AGPL 검토"
+    license_url = "https://pymupdf.readthedocs.io/en/latest/about.html#license-and-copyright"
 
     def convert(self, path: Path) -> ConversionResult:
         try:
