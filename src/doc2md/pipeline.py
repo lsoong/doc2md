@@ -41,9 +41,24 @@ def convert_file(
     if not path.is_file():
         raise FileNotFoundError(f"파일이 없습니다: {path}")
     backend = resolve_engine(engine, path, cfg)
+
+    # 엔진 내장 LLM 연결을 요청했는데 그 엔진에 훅이 없으면 후처리 정제로 대체한다.
+    wants_engine_llm = bool(cfg.engine_options.get(backend.name, {}).get("use_llm"))
+    fell_back = wants_engine_llm and not backend.llm_hooks
+
     if progress:
-        progress(f"{path.name}: {backend.title} 엔진으로 변환 중")
+        mode = ""
+        if wants_engine_llm and not fell_back:
+            mode = f" (+내장 LLM: {backend.resolve_hook().mode})"
+        progress(f"{path.name}: {backend.title} 엔진으로 변환 중{mode}")
     result = backend.convert(path)
+
+    if fell_back:
+        result.warnings.append(
+            f"{backend.title} 에는 내장 LLM 연결이 없어 --refine(후처리 정제)으로 대체했습니다. "
+            "엔진별 지원 현황은 doc2md engines --llm 으로 확인하세요."
+        )
+        refine = True
 
     if refine and result.markdown.strip():
         if progress:

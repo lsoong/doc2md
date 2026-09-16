@@ -62,6 +62,34 @@ LlamaParse·Mathpix(사외 전송 — 사내 문서 반출 금지).
 게이트웨이 방언은 OpenAI 호환(vLLM·LiteLLM·Ollama)과 Anthropic Messages 두 가지를 지원한다.
 SDK 를 쓰지 않고 httpx 로 직접 호출해 사내 프록시·사설 인증서 환경에서 문제를 줄였다.
 
+## 5. 엔진에 내장된 LLM 연결 (`--engine-llm`, 2026-09 추가)
+
+위 세 갈래는 doc2md 가 엔진 **밖에서** 모델을 부르는 방식이다. 조사해 보니 주요 엔진들은
+파이프라인 **안쪽에** 모델을 끼우는 자리를 이미 갖고 있었고, 대부분 "OpenAI 호환 주소를
+달라"는 형태라 사내 게이트웨이를 그대로 물릴 수 있다. 엔진별로 붙는 자리가 다르다.
+
+| 엔진 | 엔진이 제공하는 연결점 | doc2md 모드 | 실제로 모델이 보는 것 |
+|---|---|---|---|
+| MarkItDown | `MarkItDown(llm_client=, llm_model=, llm_prompt=)` | `caption` | 이미지 파일·PPT 슬라이드 안의 그림 |
+| Docling | VLM 파이프라인 + `ApiVlmOptions`/`ApiVlmEngineOptions` | `vlm` | 페이지 이미지 전체 |
+| Docling | `do_picture_description` + `PictureDescriptionApiOptions` | `picture` | 본문에서 잘라낸 그림만 |
+| Marker | `--use_llm` + `marker.services.*` | `refine` | 애매한 표·수식 블록 |
+| MinerU | `-b vlm-http-client -u <url>` | `vlm-http-client` | (MinerU2 전용 VLM 서버) |
+| PyMuPDF4LLM | 없음 | — | `--refine` 으로 대체 |
+
+구현할 때 걸린 것들:
+
+- **MarkItDown 은 OpenAI 클라이언트 "객체"를 요구**하지만 실제로 쓰는 건
+  `client.chat.completions.create` 하나뿐이다. openai 패키지를 깔지 않고
+  `OpenAICompatClient` 로 흉내 내 사내 게이트웨이(Anthropic 방언 포함)에 물렸다.
+- **엔진이 직접 HTTP 를 치는 훅(docling·marker)은 OpenAI 호환만 받는다.** Anthropic 방언
+  게이트웨이만 있는 환경을 위해 `[llm] openai_base_url` 을 따로 뒀다.
+- **docling 의 그림 설명 기본 임계값(`picture_area_threshold = 0.05`)이 작은 차트를 통째로
+  건너뛴다.** 기본값을 0.02 로 낮추고 `picture_min_area` 옵션으로 열어 뒀다.
+- **MinerU 의 `vlm-http-client` 는 범용 챗 모델이 아니다.** MinerU2 전용 가중치를 올린
+  vLLM/SGLang 서버를 가리키므로 사내 챗 게이트웨이 주소를 넣으면 안 된다. 별도 옵션
+  (`server_url` / `--llm-url`)으로 분리하고, 주소가 없으면 에러로 막는다.
+
 ## 출처
 
 - [OmniDocBench (opendatalab)](https://github.com/opendatalab/OmniDocBench)
@@ -71,3 +99,7 @@ SDK 를 쓰지 않고 httpx 로 직접 호출해 사내 프록시·사설 인증
 - [Best Open-Source PDF-to-Markdown Tools in 2026](https://themenonlab.blog/blog/best-open-source-pdf-to-markdown-tools-2026)
 - [PDF→Markdown 재현 가능 벤치마크 저장소](https://github.com/pdfmarkdownapp/pdf-to-markdown-benchmark)
 - [PDF Parsing for RAG 2026: MinerU vs Docling vs Marker](https://builderai.tools/blog/pdf-parsing-for-rag-mineru-docling-marker-compared)
+- [MarkItDown — LLM 이미지 설명 옵션](https://github.com/microsoft/markitdown#optional-dependencies)
+- [Docling — 원격 VLM/그림 설명 API 연결 예제](https://docling-project.github.io/docling/examples/vlm_pipeline_api_model/)
+- [Marker — `--use_llm` 과 LLM 서비스 목록](https://github.com/datalab-to/marker#use-llms-to-improve-accuracy)
+- [MinerU 2 — VLM 백엔드와 http-client 모드](https://github.com/opendatalab/mineru#quick-usage)

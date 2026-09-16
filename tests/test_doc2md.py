@@ -14,8 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from doc2md.backends import ENGINES, engines_for, pick_auto  # noqa: E402
-from doc2md.config import Config, LLMConfig, load_config  # noqa: E402
-from doc2md.llm import LLMClient  # noqa: E402
+from doc2md.backends.docling_backend import (  # noqa: E402
+    chat_endpoint,
+    inject_picture_descriptions,
+)
+from doc2md.backends.marker_backend import marker_llm_config  # noqa: E402
+from doc2md.config import Config, ConfigError, LLMConfig, load_config  # noqa: E402
+from doc2md.llm import LLMClient, OpenAICompatClient  # noqa: E402
 from doc2md.metrics import measure, table_health  # noqa: E402
 from doc2md.pipeline import (  # noqa: E402
     collect_inputs,
@@ -223,3 +228,245 @@ def test_convert_with_refine_marks_result():
         result = convert_file(SAMPLES / "sample.xlsx", engine="markitdown", cfg=cfg, refine=True)
         assert result.llm_refined is True
         assert result.markdown.startswith("## 정제됨")
+
+
+# ------------------------------------------------- 엔진 내장 LLM 연결 (SYA-31 추가분)
+def engine_llm_config(base_url: str, engine: str, **options) -> Config:
+    """엔진 내장 LLM 연결을 켠 설정."""
+    cfg = Config(
+        llm=LLMConfig(
+            base_url=base_url,
+            model="corp-llm-32b",
+            vision_model="corp-vl-32b",
+            timeout=30,
+        )
+    )
+    cfg.engine_options[engine] = {"use_llm": True, **options}
+    return cfg
+
+
+def test_shim_client_speaks_openai_chat_api():
+    with StubGateway() as gw:
+        with LLMClient(gateway_config(gw.base_url).llm) as client:
+            shim = OpenAICompatClient(client)
+            answer = shim.chat.completions.create(
+                model="corp-vl-32b",
+                messages=[{"role": "user", "content": "본문\n두 번째 줄"}],
+            )
+        assert answer.choices[0].message.content.startswith("## 정제됨")
+        assert gw.requests[-1]["payload"]["model"] == "corp-vl-32b"
+
+
+def test_shim_client_translates_images_for_anthropic_gateway():
+    with StubGateway() as gw:
+        with LLMClient(gateway_config(gw.base_url, api="anthropic").llm) as client:
+            OpenAICompatClient(client).chat.completions.create(
+                model="corp-vl-32b",
+                messages=[
+                    {"role": "system", "content": "지시"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "설명해"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,QUJD"},
+                            },
+                        ],
+                    },
+                ],
+            )
+        req = gw.requests[-1]
+        assert req["path"].endswith("/v1/messages")
+        assert req["payload"]["system"] == "지시"
+        blocks = req["payload"]["messages"][0]["content"]
+        assert [b["type"] for b in blocks] == ["text", "image"]
+        assert blocks[1]["source"]["data"] == "QUJD"
+
+
+@pytest.mark.skipif(not (SAMPLES / "sample.png").exists(), reason="이미지 샘플 없음")
+def test_markitdown_caption_hook_sends_image_to_vision_model():
+    pytest.importorskip("markitdown")
+    with StubGateway() as gw:
+        cfg = engine_llm_config(gw.base_url, "markitdown")
+        result = convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+        assert result.engine_llm == "caption"
+        assert "비전 변환 결과" in result.markdown
+        payload = gw.requests[-1]["payload"]
+        assert payload["model"] == "corp-vl-32b"  # 비전 훅은 vision_model 을 쓴다
+        parts = payload["messages"][-1]["content"]
+        assert any(p.get("type") == "image_url" for p in parts)
+
+
+@pytest.mark.skipif(not (SAMPLES / "sample.png").exists(), reason="이미지 샘플 없음")
+def test_markitdown_without_engine_llm_does_not_call_gateway():
+    pytest.importorskip("markitdown")
+    with StubGateway() as gw:
+        cfg = gateway_config(gw.base_url)
+        result = convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+        assert result.engine_llm == ""
+        assert gw.requests == []
+
+
+def test_engine_llm_model_option_overrides_role_default():
+    with StubGateway() as gw:
+        cfg = engine_llm_config(gw.base_url, "markitdown", llm_model="corp-llm-8b")
+        convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+        assert gw.requests[-1]["payload"]["model"] == "corp-llm-8b"
+
+
+def test_unknown_llm_mode_is_rejected():
+    cfg = engine_llm_config("http://127.0.0.1:1", "markitdown", llm_mode="없는모드")
+    with pytest.raises(ConfigError, match="llm_mode"):
+        convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+
+
+def test_anthropic_gateway_needs_openai_url_for_engine_hooks():
+    cfg = engine_llm_config("https://gw.example/anthropic", "markitdown")
+    cfg.llm.api = "anthropic"
+    with pytest.raises(ConfigError, match="openai_base_url"):
+        convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+    # openai_base_url 을 채우면 그 주소로 붙는다
+    with StubGateway() as gw:
+        cfg.llm.openai_base_url = gw.base_url
+        result = convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+        assert result.engine_llm == "caption"
+        assert gw.requests[-1]["path"].endswith("/chat/completions")
+
+
+def test_engine_without_hook_falls_back_to_refine():
+    pytest.importorskip("pymupdf4llm")
+    with StubGateway() as gw:
+        cfg = Config(llm=LLMConfig(base_url=gw.base_url, model="corp-llm-32b", timeout=30))
+        cfg.engine_options["pymupdf4llm"] = {"use_llm": True}
+        result = convert_file(SAMPLES / "sample.pdf", engine="pymupdf4llm", cfg=cfg)
+        assert result.engine_llm == ""
+        assert result.llm_refined is True  # --refine 으로 대체됐다
+        assert any("내장 LLM 연결이 없어" in w for w in result.warnings)
+
+
+@pytest.mark.skipif(not SAMPLES.exists(), reason="샘플 문서 없음")
+def test_docling_vlm_hook_sends_page_image_to_gateway():
+    pytest.importorskip("docling")
+    with StubGateway() as gw:
+        cfg = engine_llm_config(gw.base_url, "docling", llm_mode="vlm", scale=1.0)
+        cfg.llm.api_key = "corp-key"
+        result = convert_file(SAMPLES / "sample.pdf", engine="docling", cfg=cfg)
+        assert result.engine_llm == "vlm"
+        assert "비전 변환 결과" in result.markdown
+        req = gw.requests[-1]
+        assert req["payload"]["model"] == "corp-vl-32b"
+        assert req["headers"]["Authorization"] == "Bearer corp-key"
+        assert any(
+            p.get("type") == "image_url" for p in req["payload"]["messages"][-1]["content"]
+        )
+
+
+@pytest.mark.skipif(
+    not (SAMPLES / "sample-image.pdf").exists(), reason="그림 포함 샘플 없음"
+)
+def test_docling_picture_hook_describes_only_pictures():
+    pytest.importorskip("docling")
+    with StubGateway() as gw:
+        cfg = engine_llm_config(gw.base_url, "docling", llm_mode="picture")
+        result = convert_file(SAMPLES / "sample-image.pdf", engine="docling", cfg=cfg)
+        assert result.engine_llm == "picture"
+        # 본문은 docling 이 읽고(원문의 줄바꿈 없는 공백까지 그대로), 그림 자리에만
+        # 모델 설명이 들어간다
+        body = result.markdown.replace("\xa0", " ")
+        assert "그림이 들어간 문서" in body
+        assert "비전 변환 결과" in body  # 스텁 모델이 붙인 그림 설명
+        assert "<!-- image -->" not in result.markdown  # 자리표시자가 대체됐다
+        assert result.markdown.count("비전 변환 결과") == 2  # alt 텍스트 + 설명, 중복 없음
+        assert len(gw.requests) == 1  # 페이지 전체가 아니라 그림 한 장만 보냈다
+
+
+def test_inject_picture_descriptions_keeps_placeholder_when_empty():
+    class Meta:
+        def __init__(self, text):
+            self.description = type("D", (), {"text": text})() if text else None
+
+    class Picture:
+        def __init__(self, text):
+            self.meta = Meta(text)
+
+    md = "앞\n\n<!-- image -->\n\n중간\n\n<!-- image -->\n\n뒤"
+    doc = type("Doc", (), {"pictures": [Picture("차트"), Picture("")]})()
+    out, described = inject_picture_descriptions(md, doc)
+    assert described == 1
+    assert "**그림 설명(사내 모델):**\n\n차트" in out
+    assert out.count("<!-- image -->") == 1  # 설명이 없는 그림은 그대로 둔다
+
+
+def test_inject_picture_descriptions_does_not_duplicate_existing_text():
+    class Picture:
+        def __init__(self, text):
+            self.meta = type("M", (), {"description": type("D", (), {"text": text})()})()
+
+    # docling 이 이미 본문에 설명을 넣어 준 경우
+    md = "앞\n\n<!-- image -->\n\n매출이 늘었다"
+    out, described = inject_picture_descriptions(
+        md, type("Doc", (), {"pictures": [Picture("매출이 늘었다")]})()
+    )
+    assert described == 1
+    assert out.count("매출이 늘었다") == 2  # 이미지 alt 텍스트 + 원래 설명 (중복 단락 없음)
+    assert "**그림 설명(사내 모델):**" not in out
+
+
+def test_chat_endpoint_normalizes_url():
+    assert chat_endpoint("https://gw/v1") == "https://gw/v1/chat/completions"
+    assert chat_endpoint("https://gw/v1/") == "https://gw/v1/chat/completions"
+    assert (
+        chat_endpoint("https://gw/v1/chat/completions") == "https://gw/v1/chat/completions"
+    )
+
+
+def test_marker_llm_config_points_at_gateway():
+    config = marker_llm_config(
+        base_url="https://gw.example/v1",
+        model="corp-vl-32b",
+        api_key="",
+        service="marker.services.openai.OpenAIService",
+    )
+    assert config["use_llm"] is True
+    assert config["llm_service"].endswith("OpenAIService")
+    assert config["openai_base_url"] == "https://gw.example/v1"
+    assert config["openai_model"] == "corp-vl-32b"
+    assert config["openai_api_key"]  # openai SDK 는 빈 키를 거부한다
+
+
+def test_mineru_vlm_backend_builds_client_command(tmp_path):
+    from doc2md.backends.mineru_backend import MinerUBackend
+
+    cfg = Config()
+    cfg.engine_options["mineru"] = {
+        "use_llm": True,
+        "server_url": "http://mineru-vlm.corp:30000",
+    }
+    backend = MinerUBackend(cfg)
+    cmd = backend.build_command("mineru", tmp_path / "a.pdf", tmp_path, "vlm-http-client")
+    assert "-b" in cmd and cmd[cmd.index("-b") + 1] == "vlm-http-client"
+    assert cmd[cmd.index("-u") + 1] == "http://mineru-vlm.corp:30000"
+
+
+def test_mineru_vlm_backend_requires_server_url(tmp_path):
+    from doc2md.backends.mineru_backend import MinerUBackend
+
+    cfg = Config()
+    cfg.engine_options["mineru"] = {"use_llm": True}
+    backend = MinerUBackend(cfg)
+    with pytest.raises(ConfigError, match="서버 주소"):
+        backend.build_command("mineru", tmp_path / "a.pdf", tmp_path, "vlm-http-client")
+
+
+def test_set_engine_options_applies_to_all_engines_when_auto():
+    from doc2md.config import set_engine_options
+
+    cfg = Config()
+    set_engine_options(cfg, "auto", {"use_llm": True}, all_engines=list(ENGINES))
+    assert cfg.engine_options["docling"]["use_llm"] is True
+    assert cfg.engine_options["markitdown"]["use_llm"] is True
+
+    cfg2 = Config()
+    set_engine_options(cfg2, "docling", {"use_llm": True}, all_engines=list(ENGINES))
+    assert list(cfg2.engine_options) == ["docling"]

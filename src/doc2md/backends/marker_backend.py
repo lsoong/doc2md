@@ -2,6 +2,12 @@
 
 배치 처리량이 가장 좋고 수식·코드 블록 복원이 강하다. GPU 가 있으면 페이지당 처리
 속도가 크게 벌어진다. 모델은 첫 실행 때 내려받는다.
+
+내장 LLM 연결: marker 의 `--use_llm`. 레이아웃 모델이 1차로 읽은 뒤, 애매한 표(쪽을
+넘어가는 표·병합 셀)·수식·서식을 LLM 이 고쳐 준다. 페이지 전체를 LLM 에 맡기지 않아
+비용 대비 정확도 개선이 크다. 붙일 서비스는 marker 의 LLMService 구현으로 고르는데,
+사내 게이트웨이가 OpenAI 호환이면 marker.services.openai.OpenAIService 를 쓴다
+(marker 쪽이 openai 패키지를 쓰므로 `pip install openai` 가 함께 필요하다).
 """
 
 from __future__ import annotations
@@ -9,10 +15,12 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .base import Backend, BackendUnavailable, ConversionResult
+from .base import Backend, BackendUnavailable, ConversionResult, LLMHook
 
 # 모델 로딩이 수 초 걸리므로 프로세스 안에서 한 번만 만든다.
 _MODEL_CACHE: dict | None = None
+
+DEFAULT_LLM_SERVICE = "marker.services.openai.OpenAIService"
 
 
 class MarkerBackend(Backend):
@@ -22,6 +30,14 @@ class MarkerBackend(Backend):
     install_hint = "pip install marker-pdf"
     priority = 70
     requires = ("marker",)
+    llm_hooks = (
+        LLMHook(
+            "refine",
+            "표 병합·수식·서식이 애매한 블록만 사내 모델이 다시 읽는다 (marker --use_llm)",
+            role="vision",
+            default=True,
+        ),
+    )
 
     def convert(self, path: Path) -> ConversionResult:
         global _MODEL_CACHE
@@ -42,7 +58,21 @@ class MarkerBackend(Backend):
         if self.option("page_range"):
             config["page_range"] = self.option("page_range")
 
-        converter = PdfConverter(artifact_dict=_MODEL_CACHE, config=config)
+        used_mode = ""
+        if self.llm_enabled:
+            hook = self.resolve_hook()
+            url, model = self.gateway_for(hook)
+            config.update(
+                marker_llm_config(
+                    base_url=url,
+                    model=model,
+                    api_key=self.cfg.llm.api_key,
+                    service=str(self.option("llm_service", "") or DEFAULT_LLM_SERVICE),
+                )
+            )
+            used_mode = hook.mode
+
+        converter = PdfConverter(artifact_dict=_MODEL_CACHE, **self._converter_kwargs(config))
         rendered = converter(str(path))
         markdown, _, images = text_from_rendered(rendered)
 
@@ -57,7 +87,53 @@ class MarkerBackend(Backend):
             path,
             elapsed=time.perf_counter() - started,
             images=image_bytes,
+            engine_llm=used_mode,
         )
+
+    def _converter_kwargs(self, config: dict) -> dict:
+        """LLM 을 쓸 때는 marker 의 ConfigParser 로 서비스 객체까지 만들어 넘긴다."""
+        if not config.get("use_llm"):
+            return {"config": config}
+        try:
+            from marker.config.parser import ConfigParser
+        except ImportError as exc:  # pragma: no cover - 아주 예전 marker
+            raise BackendUnavailable(
+                "이 marker 버전은 LLM 연결(ConfigParser)을 지원하지 않습니다. "
+                "pip install -U marker-pdf"
+            ) from exc
+
+        parser = ConfigParser(config)
+        try:
+            service = parser.get_llm_service()
+        except ImportError as exc:  # openai 패키지 미설치 등
+            raise BackendUnavailable(
+                f"marker 의 LLM 서비스를 못 만들었습니다: {exc}\n"
+                "  OpenAI 호환 서비스에는 `pip install openai` 가 필요합니다."
+            ) from exc
+        return {
+            "config": parser.generate_config_dict(),
+            "llm_service": service,
+            "processor_list": parser.get_processors(),
+            "renderer": parser.get_renderer(),
+        }
+
+
+def marker_llm_config(*, base_url: str, model: str, api_key: str, service: str) -> dict:
+    """marker 가 사내 게이트웨이를 보게 하는 설정 조각.
+
+    marker 의 OpenAIService 는 openai SDK 를 그대로 쓰므로 base_url 은 /v1 루트를,
+    api_key 는 빈 문자열이 아닌 값을 요구한다(인증이 없는 사내 게이트웨이면 아무 값).
+    """
+    config: dict = {
+        "use_llm": True,
+        "llm_service": service,
+        "openai_base_url": base_url,
+        "openai_model": model,
+        "openai_api_key": api_key or "no-key",
+    }
+    if service.endswith("ClaudeService"):
+        config.update(claude_model_name=model, claude_api_key=api_key or "no-key")
+    return config
 
 
 def _pil_to_png(image: object) -> bytes | None:

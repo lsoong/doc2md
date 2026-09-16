@@ -46,18 +46,39 @@ class Handler(BaseHTTPRequestHandler):
         )
         if self.path.endswith("/chat/completions"):
             text = _reply_for_openai(payload)
+            # docling 처럼 응답을 엄격하게 검증하는 라이브러리가 있어 실제 게이트웨이와
+            # 같은 필드(id·created·index·finish_reason·usage)를 모두 채워 준다.
             self._send(
                 {
-                    "choices": [{"message": {"role": "assistant", "content": text}}],
+                    "id": f"chatcmpl-stub-{len(Handler.requests)}",
+                    "object": "chat.completion",
+                    "created": 1700000000,
                     "model": payload.get("model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": len(text),
+                        "total_tokens": len(text) + 1,
+                    },
                 }
             )
             return
         if self.path.endswith("/messages"):
             self._send(
                 {
+                    "id": "msg-stub",
+                    "type": "message",
+                    "role": "assistant",
                     "content": [{"type": "text", "text": "## 정제됨(anthropic)"}],
                     "model": payload.get("model"),
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             )
             return

@@ -26,7 +26,14 @@ from .backends import (
     EngineNotFound,
     engines_for,
 )
-from .config import SAMPLE_CONFIG, USER_CONFIG_PATH, ConfigError, load_config, override_llm
+from .config import (
+    SAMPLE_CONFIG,
+    USER_CONFIG_PATH,
+    ConfigError,
+    load_config,
+    override_llm,
+    set_engine_options,
+)
 from .llm import JUDGE_PROMPT, JUDGE_SYSTEM, LLMClient, LLMError
 from .metrics import summarize, to_json
 from .pipeline import collect_inputs, convert_file, output_stems, write_result
@@ -45,18 +52,66 @@ def _fail(message: str) -> "typer.Exit":
     return typer.Exit(code=1)
 
 
-def _load(config: str | None, api: str | None, base_url: str | None, model: str | None):
+def _load(
+    config: str | None,
+    api: str | None,
+    base_url: str | None,
+    model: str | None,
+    vision_model: str | None = None,
+):
     try:
         cfg = load_config(config)
     except ConfigError as exc:
         raise _fail(str(exc)) from exc
-    return override_llm(cfg, api=api, base_url=base_url, model=model)
+    return override_llm(
+        cfg, api=api, base_url=base_url, model=model, vision_model=vision_model
+    )
+
+
+def _apply_engine_llm(
+    cfg,
+    *,
+    engine: str,
+    engine_llm: bool,
+    llm_mode: str | None,
+    llm_model: str | None,
+    llm_url: str | None,
+) -> None:
+    """--engine-llm 계열 인자를 엔진 옵션으로 옮긴다."""
+    set_engine_options(
+        cfg,
+        engine,
+        {"llm_mode": llm_mode, "llm_model": llm_model, "server_url": llm_url},
+        all_engines=list(ENGINES),
+    )
+    if not engine_llm:
+        return
+
+    if engine not in ("", "auto"):
+        cls = ENGINES.get(engine)
+        if cls is not None and not cls.llm_hooks:
+            raise _fail(
+                f"{engine} 엔진에는 내장 LLM 연결이 없습니다. "
+                "--refine 을 쓰거나 doc2md engines --llm 으로 지원 엔진을 확인하세요."
+            )
+        names = [engine]
+    else:
+        # auto 는 어느 엔진이 뽑힐지 모른다. 사내 게이트웨이에 바로 붙는 엔진만 켜고,
+        # 별도 추론 서버가 필요한 엔진(mineru)은 --llm-url 을 준 경우에만 켠다.
+        names = [
+            name
+            for name, cls in ENGINES.items()
+            if cls.llm_hooks and ((hook := cls.default_hook()) and (hook.uses_gateway or llm_url))
+        ]
+    for name in names:
+        cfg.engine_options.setdefault(name, {})["use_llm"] = True
 
 
 # --------------------------------------------------------------------- engines
 @app.command()
 def engines(
     fmt: str = typer.Option("", "--format", "-f", help="이 확장자를 지원하는 엔진만 (예: pdf)"),
+    llm: bool = typer.Option(False, "--llm", help="엔진별 LLM 연결 방식을 자세히 본다"),
 ) -> None:
     """설치된 변환 엔진과 지원 포맷을 보여 준다."""
     classes = list(ENGINE_CLASSES)
@@ -65,27 +120,60 @@ def engines(
         classes = [c for c in classes if suffix.lower() in c.extensions]
         if not classes:
             raise _fail(f"{suffix} 를 지원하는 엔진이 없습니다.")
+    ordered = sorted(classes, key=lambda c: c.priority, reverse=True)
+
+    if llm:
+        table = Table(title="엔진 내장 LLM 연결 (--engine-llm 으로 켠다)")
+        table.add_column("엔진", style="bold")
+        table.add_column("--llm-mode")
+        table.add_column("기본", justify="center")
+        table.add_column("붙는 대상")
+        table.add_column("하는 일")
+        for cls in ordered:
+            if not cls.llm_hooks:
+                table.add_row(cls.name, "[dim]없음[/]", "", "", "[dim]--refine(후처리 정제)으로 대체됩니다[/]")
+                continue
+            for hook in cls.llm_hooks:
+                table.add_row(
+                    cls.name,
+                    hook.mode,
+                    "●" if hook.default else "",
+                    "사내 게이트웨이" if hook.uses_gateway else "[yellow]별도 추론 서버[/]",
+                    escape(hook.summary),
+                )
+        console.print(table)
+        console.print(
+            "모델은 --llm-model 로 고릅니다. 생략하면 vision_model(없으면 model)을 씁니다.\n"
+            "어느 엔진에도 붙지 않는 일반 정제는 --refine 입니다."
+        )
+        return
 
     table = Table(title="doc2md 변환 엔진 (우선순위 높은 순)")
     table.add_column("엔진", style="bold")
     table.add_column("이름")
     table.add_column("상태")
     table.add_column("우선순위", justify="right")
+    table.add_column("내장 LLM")
     table.add_column("지원 포맷")
-    for cls in sorted(classes, key=lambda c: c.priority, reverse=True):
+    for cls in ordered:
         available = cls.is_available()
         status = "[green]설치됨[/]" if available else f"[yellow]미설치[/] ({escape(cls.install_hint)})"
         if cls.needs_llm:
             status += " [cyan]+사내모델 필요[/]"
+        hooks = "/".join(h.mode for h in cls.llm_hooks) or "[dim]—[/]"
         table.add_row(
             cls.name,
             cls.title,
             status,
             str(cls.priority),
+            hooks,
             " ".join(e.lstrip(".") for e in cls.extensions),
         )
     console.print(table)
-    console.print("auto 선택 시 위 순서대로 설치된 첫 엔진을 씁니다 (vlm 은 명시할 때만).")
+    console.print(
+        "auto 선택 시 위 순서대로 설치된 첫 엔진을 씁니다 (vlm 은 명시할 때만).\n"
+        "내장 LLM 연결은 --engine-llm 으로 켜고, 자세한 설명은 doc2md engines --llm."
+    )
 
 
 # ---------------------------------------------------------------------- models
@@ -121,19 +209,28 @@ def models(
     console.print(table)
 
 
-def _pick_model(cfg) -> str:
-    """대화식으로 모델을 고른다."""
-    with LLMClient(cfg.llm) as client:
-        found = client.list_models()
+def _pick_model(cfg, *, also_vision: bool = False) -> None:
+    """대화식으로 모델을 고른다. cfg.llm 을 직접 고쳐 준다."""
+    try:
+        with LLMClient(cfg.llm) as client:
+            found = client.list_models()
+    except (LLMError, ConfigError) as exc:
+        raise _fail(str(exc)) from exc
     if not found:
         raise _fail("고를 수 있는 모델이 없습니다. --model 로 직접 지정하세요.")
     for index, name in enumerate(found, start=1):
         console.print(f"  [bold]{index:2}[/] {name}")
-    choice = typer.prompt("사용할 모델 번호", default="1")
-    try:
-        return found[int(choice) - 1]
-    except (ValueError, IndexError):
-        raise _fail(f"잘못된 선택: {choice}") from None
+
+    def ask(label: str, default: str) -> str:
+        choice = typer.prompt(label, default=default)
+        try:
+            return found[int(choice) - 1]
+        except (ValueError, IndexError):
+            raise _fail(f"잘못된 선택: {choice}") from None
+
+    cfg.llm.model = ask("사용할 모델 번호", "1")
+    if also_vision:
+        cfg.llm.vision_model = ask("이미지를 읽을 비전 모델 번호 (엔진 내장 LLM·vlm 용)", "1")
 
 
 # --------------------------------------------------------------------- convert
@@ -144,9 +241,16 @@ def convert(
     out: Path = typer.Option(Path("."), "--out", "-o", help="출력 디렉터리"),
     stdout: bool = typer.Option(False, "--stdout", help="파일 대신 표준출력으로"),
     recursive: bool = typer.Option(False, "--recursive", "-r", help="디렉터리를 재귀 탐색"),
-    refine: bool = typer.Option(False, "--refine", help="사내 모델로 결과를 다듬는다"),
+    refine: bool = typer.Option(False, "--refine", help="변환이 끝난 Markdown 을 사내 모델로 다듬는다"),
+    engine_llm: bool = typer.Option(
+        False, "--engine-llm", "-L", help="엔진에 내장된 LLM 연결을 켠다 (doc2md engines --llm)"
+    ),
+    llm_mode: str = typer.Option(None, "--llm-mode", help="엔진이 여러 연결 방식을 가질 때 고른다"),
+    llm_model: str = typer.Option(None, "--llm-model", help="엔진 내장 LLM 이 쓸 모델 ID"),
+    llm_url: str = typer.Option(None, "--llm-url", help="엔진이 별도 추론 서버를 쓸 때의 주소 (mineru)"),
     pick_model: bool = typer.Option(False, "--pick-model", help="모델을 대화식으로 고른다"),
-    model: str = typer.Option(None, "--model", "-m", help="사내 모델 ID"),
+    model: str = typer.Option(None, "--model", "-m", help="사내 모델 ID (정제용 기본 모델)"),
+    vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
     api: str = typer.Option(None, "--api", help="openai | anthropic"),
     base_url: str = typer.Option(None, "--base-url", help="사내 게이트웨이 주소"),
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
@@ -154,11 +258,19 @@ def convert(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="진행 메시지를 감춘다"),
 ) -> None:
     """문서를 Markdown 으로 변환한다."""
-    cfg = _load(config, api, base_url, model)
+    cfg = _load(config, api, base_url, model, vision_model)
     if pick_model:
-        cfg.llm.model = _pick_model(cfg)
+        _pick_model(cfg, also_vision=engine_llm or engine == "vlm")
     if refine and not cfg.llm.model:
         raise _fail("--refine 에는 모델이 필요합니다. --model 또는 --pick-model 을 쓰세요.")
+    _apply_engine_llm(
+        cfg,
+        engine=engine,
+        engine_llm=engine_llm,
+        llm_mode=llm_mode,
+        llm_model=llm_model,
+        llm_url=llm_url,
+    )
 
     files = collect_inputs(list(paths), recursive=recursive)
     if not files:
@@ -194,7 +306,8 @@ def convert(
             continue
         written = write_result(result, out, stem=stems[path], save_images=not no_images)
         suffix = f" (+이미지 {written.image_count}개)" if written.image_count else ""
-        refined = " +정제" if result.llm_refined else ""
+        refined = f" +LLM:{result.engine_llm}" if result.engine_llm else ""
+        refined += " +정제" if result.llm_refined else ""
         if not quiet:
             console.print(
                 f"[green]완료[/] {path.name} → {written.markdown_path} "
@@ -214,14 +327,20 @@ def compare(
     ),
     out: Path = typer.Option(None, "--out", "-o", help="엔진별 결과를 저장할 디렉터리"),
     judge: bool = typer.Option(False, "--judge", help="사내 모델에게 순위를 매기게 한다"),
+    engine_llm: bool = typer.Option(
+        False, "--engine-llm", "-L", help="각 엔진의 내장 LLM 연결을 켜고 비교한다"
+    ),
+    llm_mode: str = typer.Option(None, "--llm-mode", help="엔진 내장 LLM 의 연결 방식"),
+    llm_model: str = typer.Option(None, "--llm-model", help="엔진 내장 LLM 이 쓸 모델 ID"),
     model: str = typer.Option(None, "--model", "-m", help="심사에 쓸 사내 모델 ID"),
+    vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
     api: str = typer.Option(None, "--api", help="openai | anthropic"),
     base_url: str = typer.Option(None, "--base-url", help="사내 게이트웨이 주소"),
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
     json_out: bool = typer.Option(False, "--json", help="지표를 JSON 으로 출력"),
 ) -> None:
     """같은 문서를 여러 엔진으로 변환해 결과를 비교한다."""
-    cfg = _load(config, api, base_url, model)
+    cfg = _load(config, api, base_url, model, vision_model)
     if not path.is_file():
         raise _fail(f"파일이 없습니다: {path}")
 
@@ -231,6 +350,20 @@ def compare(
         names = [c.name for c in engines_for(path) if not c.needs_llm]
     if not names:
         raise _fail(f"{path.suffix} 를 지원하는 설치된 엔진이 없습니다. doc2md engines 로 확인하세요.")
+
+    if engine_llm:
+        # 훅이 없는 엔진은 그대로 두고, 있는 엔진만 켠다 (비교 대상이 사라지지 않게)
+        for name in names:
+            cls = ENGINES.get(name)
+            if cls is not None and cls.llm_hooks:
+                _apply_engine_llm(
+                    cfg,
+                    engine=name,
+                    engine_llm=True,
+                    llm_mode=llm_mode,
+                    llm_model=llm_model,
+                    llm_url=None,
+                )
 
     markdowns: dict[str, str] = {}
     elapsed: dict[str, float] = {}
@@ -359,6 +492,10 @@ def config_show(
     table.add_row("llm.api_key", "설정됨" if cfg.llm.api_key else "[dim](미설정)[/]")
     table.add_row("llm.model", cfg.llm.model or "[dim](미설정)[/]")
     table.add_row("llm.vision_model", cfg.llm.effective_vision_model or "[dim](미설정)[/]")
+    table.add_row(
+        "엔진 훅용 OpenAI 주소",
+        cfg.llm.effective_openai_base_url or "[yellow](없음 — 엔진 내장 LLM 을 못 씁니다)[/]",
+    )
     for engine_name, options in cfg.engine_options.items():
         table.add_row(f"engines.{engine_name}", str(options))
     console.print(table)

@@ -134,6 +134,46 @@ def make_pdf(path: Path) -> None:
     SimpleDocTemplate(str(path), pagesize=A4, title=TITLE).build(story)
 
 
+def make_png(path: Path, source_pdf: Path) -> None:
+    """PDF 첫 쪽을 이미지로 굳힌 샘플. 이미지 전용 LLM 훅(markitdown caption) 검증용."""
+    import pymupdf
+
+    with pymupdf.open(str(source_pdf)) as doc:
+        doc.load_page(0).get_pixmap(dpi=72).save(str(path))
+
+
+def make_chart_png(path: Path) -> None:
+    """막대 차트 그림. 레이아웃 모델이 '그림'으로 잡아야 하므로 글자 사진이 아닌 도형으로."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=360, height=240)
+    page.draw_rect(pymupdf.Rect(0, 0, 360, 240), color=None, fill=(1, 1, 1))
+    for index, height in enumerate([60, 110, 90, 160, 130]):
+        left = 30 + index * 62
+        page.draw_rect(
+            pymupdf.Rect(left, 200 - height, left + 40, 200),
+            color=(0.1, 0.2, 0.5),
+            fill=(0.2, 0.4, 0.8),
+        )
+    page.draw_line(pymupdf.Point(20, 200), pymupdf.Point(340, 200), color=(0, 0, 0))
+    page.get_pixmap(dpi=96).save(str(path))
+    doc.close()
+
+
+def make_pdf_with_image(path: Path, chart: Path) -> None:
+    """그림이 들어간 PDF. docling picture 훅(그림 설명) 검증용."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 80), "그림이 들어간 문서", fontsize=18, fontname="china-ss")
+    page.insert_text((72, 110), "아래는 매출 추이 차트입니다.", fontsize=12, fontname="china-ss")
+    page.insert_image(pymupdf.Rect(72, 130, 432, 370), filename=str(chart))
+    doc.save(str(path), deflate=True, garbage=4)
+    doc.close()
+
+
 def main() -> None:
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "tests/samples")
     out.mkdir(parents=True, exist_ok=True)
@@ -141,6 +181,9 @@ def main() -> None:
     make_pptx(out / "sample.pptx")
     make_xlsx(out / "sample.xlsx")
     make_pdf(out / "sample.pdf")
+    make_png(out / "sample.png", out / "sample.pdf")
+    make_chart_png(out / "sample-chart.png")
+    make_pdf_with_image(out / "sample-image.pdf", out / "sample-chart.png")
     for path in sorted(out.iterdir()):
         print(f"{path}  {path.stat().st_size:,} bytes")
 

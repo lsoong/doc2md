@@ -25,14 +25,14 @@ doc2md engines -f pdf   # pdf 를 지원하는 엔진만
 
 ## 엔진
 
-| 엔진 | 강점 | 대상 포맷 | 비고 |
-|---|---|---|---|
-| `mineru` | 정확도 최상위(OmniDocBench), 수식·복잡 표 | pdf, 이미지 | AGPL, 무겁다 |
-| `docling` | PDF·Office 를 한 파이프라인으로, MIT | pdf docx pptx xlsx html 이미지 | **기본 주력** |
-| `marker` | 배치 처리량, 수식·코드 | pdf docx pptx xlsx epub | GPL+상용조항 |
-| `vlm` | 스캔본·도장·수기 주석. 사내 비전 모델이 직접 읽는다 | pdf, 이미지 | 페이지당 과금 |
-| `pymupdf4llm` | 압도적으로 빠름(텍스트 레이어 PDF) | pdf epub 등 | AGPL |
-| `markitdown` | 포맷 커버리지 최광, 폴백 | 거의 모든 포맷 | PDF 구조 보존 약함 |
+| 엔진 | 강점 | 대상 포맷 | 내장 LLM 연결(`--llm-mode`) | 비고 |
+|---|---|---|---|---|
+| `mineru` | 정확도 최상위(OmniDocBench), 수식·복잡 표 | pdf, 이미지 | `vlm-http-client` / `vlm-transformers` | AGPL, 무겁다 |
+| `docling` | PDF·Office 를 한 파이프라인으로, MIT | pdf docx pptx xlsx html 이미지 | `vlm` / `picture` | **기본 주력** |
+| `marker` | 배치 처리량, 수식·코드 | pdf docx pptx xlsx epub | `refine` | GPL+상용조항 |
+| `vlm` | 스캔본·도장·수기 주석. 사내 비전 모델이 직접 읽는다 | pdf, 이미지 | `page` (엔진 자체가 LLM) | 페이지당 과금 |
+| `pymupdf4llm` | 압도적으로 빠름(텍스트 레이어 PDF) | pdf epub 등 | — (`--refine` 으로 대체) | AGPL |
+| `markitdown` | 포맷 커버리지 최광, 폴백 | 거의 모든 포맷 | `caption` | PDF 구조 보존 약함 |
 
 `--engine auto`(기본)는 **포맷을 지원하는 설치된 엔진 중 우선순위가 가장 높은 것**을 고른다.
 과금되는 `vlm` 은 자동 선택에서 제외되므로 쓰려면 명시해야 한다.
@@ -77,6 +77,9 @@ vision_model = "corp-vl-32b"
 
 [engines.docling]
 ocr = false                           # 스캔 PDF 면 true
+# use_llm = true                      # 내장 LLM 연결 상시 사용
+# llm_mode = "vlm"
+# llm_model = "corp-vl-32b"
 
 [engines.vlm]
 dpi = 200
@@ -85,17 +88,59 @@ max_pages = 0                         # 0 = 제한 없음
 
 환경변수로도 덮어쓸 수 있다(설정파일보다 우선):
 `DOC2MD_BASE_URL`, `DOC2MD_API_KEY`, `DOC2MD_MODEL`, `DOC2MD_VISION_MODEL`, `DOC2MD_API`,
-`DOC2MD_ENGINE`, `DOC2MD_CONFIG`.
+`DOC2MD_OPENAI_BASE_URL`, `DOC2MD_ENGINE`, `DOC2MD_CONFIG`.
 
 `--refine` 은 결과를 조각내서 사내 모델에 보내 깨진 표 복원·잘린 줄 병합·쪽번호 제거를 시킨다.
 프롬프트가 "내용을 만들어내지 말 것"을 강제하지만, **모델이 손댄 결과이므로 중요한 문서는**
 **원본과 대조**하는 것이 맞다.
+
+### 엔진에 LLM 붙이기 (`--engine-llm`)
+
+`--refine` 이 "변환이 끝난 뒤 결과를 손보는" 것이라면, `--engine-llm`(`-L`) 은 **변환 과정
+안쪽에** 사내 모델을 끼워 넣는다. 엔진마다 붙는 자리가 다르므로 목록부터 본다.
+
+```bash
+doc2md engines --llm                  # 엔진별로 어디에 LLM 이 붙는지 표로 확인
+```
+
+```bash
+# 페이지 전체를 사내 비전 모델이 읽는다 (스캔본·복잡한 레이아웃)
+doc2md convert 스캔본.pdf -e docling -L --llm-mode vlm --llm-model corp-vl-32b
+
+# 본문·표는 docling 이 읽고, 그림만 사내 모델이 설명한다 (차트가 많은 보고서)
+doc2md convert 실적보고.pdf -e docling -L --llm-mode picture
+
+# PPT 슬라이드 그림·이미지 파일에 설명을 붙인다 (MarkItDown 의 llm_client)
+doc2md convert 발표자료.pptx -e markitdown -L
+
+# 애매한 표·수식 블록만 모델이 다시 읽는다 (marker --use_llm)
+doc2md convert 논문.pdf -e marker -L            # 별도로 `pip install openai` 필요
+
+# 사내에 MinerU2 VLM 서버를 띄워 뒀다면
+doc2md convert 보고서.pdf -e mineru -L --llm-url http://mineru-vlm.사내:30000
+
+# 엔진 내장 연결 + 후처리 정제를 같이
+doc2md convert 보고서.pdf -e docling -L --refine --pick-model
+```
+
+- **모델 선택**: `--llm-model` 로 엔진 훅이 쓸 모델을 고른다. 생략하면 비전 훅은
+  `vision_model`, 텍스트 훅은 `model` 을 쓴다. `--pick-model` 은 게이트웨이의 모델 목록을
+  띄워 번호로 고르게 하고, `-L` 과 같이 쓰면 비전 모델까지 물어본다.
+- **`-e auto` + `-L`**: 어떤 엔진이 뽑힐지 모르므로 사내 게이트웨이에 바로 붙는 엔진만
+  켠다. 뽑힌 엔진에 내장 연결이 없으면 경고와 함께 `--refine` 으로 대체한다.
+- **게이트웨이 방언**: 엔진 내장 훅은 엔진 쪽 코드가 직접 HTTP 를 치므로 **OpenAI 호환
+  엔드포인트**만 받는다. `api = "anthropic"` 게이트웨이를 쓴다면 `[llm] openai_base_url` 을
+  따로 지정하거나, `--refine` / `-e vlm`(둘 다 doc2md 가 직접 호출) 을 쓴다.
+- **MinerU 만 예외**: MinerU 의 VLM 백엔드는 범용 챗 모델이 아니라 MinerU2 전용 가중치를
+  올린 서버를 가리킨다. 사내 챗 게이트웨이 주소를 넣으면 안 된다.
+- 결과 줄에 `+LLM:vlm`, `+정제` 처럼 무엇이 붙었는지 표시된다.
 
 ### 엔진 비교 — 어떤 엔진을 표준으로 삼을지 고를 때
 
 ```bash
 doc2md compare 보고서.pdf -o cmp/         # 엔진별로 변환해 지표 표를 출력
 doc2md compare 보고서.pdf --judge         # + 사내 모델이 순위를 매긴다
+doc2md compare 보고서.pdf -L              # 각 엔진의 내장 LLM 연결을 켜고 비교
 doc2md compare 보고서.pdf --json          # 지표를 JSON 으로 (CI·집계용)
 ```
 
@@ -119,21 +164,25 @@ doc2md compare 보고서.pdf --json          # 지표를 JSON 으로 (CI·집계
 ## 개발
 
 ```bash
-python tests/make_samples.py tests/samples     # 한국어 샘플 docx/pptx/xlsx/pdf 생성
-python -m pytest tests -q                      # 테스트 (23개)
+python tests/make_samples.py tests/samples     # 한국어 샘플 docx/pptx/xlsx/pdf/png 생성
+python -m pytest tests -q                      # 테스트 (40개)
 python tests/stub_gateway.py 8777              # 사내 게이트웨이 흉내 서버
 DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
 ```
 
-사내망 접속 없이 `--refine`, `vlm`, `--judge` 경로를 전부 굴려 볼 수 있게 스텁 게이트웨이를
-넣어 뒀다. 테스트도 이 스텁으로 돈다.
+사내망 접속 없이 `--refine`, `vlm`, `--judge`, 그리고 엔진 내장 LLM 연결(`-L`) 경로를 전부
+굴려 볼 수 있게 스텁 게이트웨이를 넣어 뒀다. 테스트도 이 스텁으로 돈다 — docling 의 VLM·그림
+설명 훅은 실제로 스텁에 HTTP 요청을 보내는 것까지 확인한다.
 
 ### 엔진 추가하기
 
 1. `src/doc2md/backends/` 에 `Backend` 상속 클래스를 만든다.
 2. `name` / `title` / `extensions` / `install_hint` / `priority` / `requires` 를 채운다.
 3. `convert(path) -> ConversionResult` 를 구현한다.
-4. `backends/__init__.py` 의 `ENGINE_CLASSES` 에 등록한다.
+4. 엔진에 LLM 연결 기능이 있으면 `llm_hooks = (LLMHook(...),)` 를 채우고, `convert()` 에서
+   `self.llm_enabled` / `self.resolve_hook()` / `self.gateway_llm_config(hook)` 을 쓴다.
+   결과에는 `engine_llm=<모드 이름>` 을 실어 준다.
+5. `backends/__init__.py` 의 `ENGINE_CLASSES` 에 등록한다.
 
 `requires` 에 적은 모듈이 없으면 자동으로 "미설치"로 표시되고 `auto` 선택에서 빠진다.
 

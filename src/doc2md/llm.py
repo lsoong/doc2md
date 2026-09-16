@@ -96,6 +96,39 @@ class LLMClient:
             return self._complete_anthropic(prompt, system, images, model, max_tokens)
         return self._complete_openai(prompt, system, images, model, max_tokens)
 
+    def chat(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """OpenAI 형식 messages 를 그대로 받는 저수준 호출.
+
+        엔진 내장 LLM 훅에 게이트웨이를 끼워 넣을 때(OpenAICompatClient) 쓴다.
+        게이트웨이가 Anthropic 방언이면 여기서 형식을 바꿔 준다.
+        """
+        model = model or self.cfg.model
+        max_tokens = max_tokens or self.cfg.max_tokens
+        if self.cfg.api == "anthropic":
+            system, converted = _openai_to_anthropic(messages)
+            payload: dict = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": self.cfg.temperature,
+                "messages": converted,
+            }
+            if system:
+                payload["system"] = system
+            return self._text_from_anthropic(self._post("/v1/messages", payload))
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": self.cfg.temperature,
+        }
+        return self._text_from_openai(self._post("/chat/completions", payload))
+
     def _complete_openai(
         self,
         prompt: str,
@@ -123,9 +156,22 @@ class LLMClient:
             "temperature": self.cfg.temperature,
         }
         data = self._post("/chat/completions", payload)
+        return self._text_from_openai(data)
+
+    @staticmethod
+    def _text_from_openai(data: dict) -> str:
         try:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"예상치 못한 응답 형식: {json.dumps(data)[:300]}") from exc
+
+    @staticmethod
+    def _text_from_anthropic(data: dict) -> str:
+        try:
+            return "".join(
+                block.get("text", "") for block in data["content"] if block.get("type") == "text"
+            )
+        except (KeyError, TypeError) as exc:
             raise LLMError(f"예상치 못한 응답 형식: {json.dumps(data)[:300]}") from exc
 
     def _complete_anthropic(
@@ -157,13 +203,7 @@ class LLMClient:
         }
         if system:
             payload["system"] = system
-        data = self._post("/v1/messages", payload)
-        try:
-            return "".join(
-                block.get("text", "") for block in data["content"] if block.get("type") == "text"
-            )
-        except (KeyError, TypeError) as exc:
-            raise LLMError(f"예상치 못한 응답 형식: {json.dumps(data)[:300]}") from exc
+        return self._text_from_anthropic(self._post("/v1/messages", payload))
 
     def close(self) -> None:
         self._client.close()
@@ -173,6 +213,122 @@ class LLMClient:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+
+# --------------------------------------------------- OpenAI SDK 흉내(엔진 훅용)
+
+def auth_headers(cfg: LLMConfig) -> dict[str, str]:
+    """엔진(docling 등)이 직접 HTTP 를 칠 때 그대로 넘겨 줄 인증 헤더.
+
+    엔진 내장 훅은 OpenAI 호환 엔드포인트만 부르므로 Bearer 로 통일한다.
+    """
+    headers = dict(cfg.extra_headers)
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    return headers
+
+
+def _openai_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
+    """OpenAI 형식 messages 를 Anthropic Messages 형식으로 옮긴다."""
+    system_parts: list[str] = []
+    converted: list[dict] = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content")
+        if role == "system":
+            system_parts.append(content if isinstance(content, str) else _flatten_text(content))
+            continue
+        if isinstance(content, str):
+            blocks: list[dict] = [{"type": "text", "text": content}]
+        else:
+            blocks = []
+            for part in content or []:
+                if part.get("type") == "text":
+                    blocks.append({"type": "text", "text": part.get("text", "")})
+                elif part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    media_type, data = _split_data_url(url)
+                    if data:
+                        blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                },
+                            }
+                        )
+        converted.append({"role": "assistant" if role == "assistant" else "user", "content": blocks})
+    return "\n\n".join(p for p in system_parts if p), converted
+
+
+def _flatten_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+    return ""
+
+
+def _split_data_url(url: str) -> tuple[str, str]:
+    """data:image/png;base64,XXXX → ("image/png", "XXXX")."""
+    if not url.startswith("data:") or ";base64," not in url:
+        return "image/png", ""
+    head, data = url.split(";base64,", 1)
+    return head[len("data:") :] or "image/png", data
+
+
+@dataclass
+class _ShimMessage:
+    content: str
+    role: str = "assistant"
+
+
+@dataclass
+class _ShimChoice:
+    message: _ShimMessage
+
+
+@dataclass
+class _ShimResponse:
+    choices: list[_ShimChoice]
+    model: str = ""
+
+
+class _ShimCompletions:
+    def __init__(self, client: "LLMClient") -> None:
+        self._client = client
+
+    def create(self, *, model: str, messages: list[dict], **kwargs: object) -> _ShimResponse:
+        max_tokens = kwargs.get("max_tokens")
+        text = self._client.chat(
+            messages,
+            model=model,
+            max_tokens=int(max_tokens) if isinstance(max_tokens, int) else None,
+        )
+        return _ShimResponse(choices=[_ShimChoice(message=_ShimMessage(content=text))], model=model)
+
+
+class _ShimChat:
+    def __init__(self, client: "LLMClient") -> None:
+        self.completions = _ShimCompletions(client)
+
+
+class OpenAICompatClient:
+    """`client.chat.completions.create(...)` 만 흉내 내는 최소 OpenAI 클라이언트.
+
+    MarkItDown 처럼 "OpenAI 클라이언트 객체를 달라"고 하는 라이브러리에 사내
+    게이트웨이를 끼워 넣기 위한 것이다. openai 패키지를 깔지 않아도 되고,
+    Anthropic 방언 게이트웨이도 그대로 받는다.
+    """
+
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+        self.chat = _ShimChat(client)
+
+    def close(self) -> None:
+        self._client.close()
 
 
 # ------------------------------------------------------------------ 프롬프트
@@ -218,6 +374,17 @@ VISION_PROMPT = """\
 7. 원문 언어를 유지하고 번역하지 않습니다.
 8. 설명 없이 Markdown 본문만 출력합니다.
 """
+
+# 엔진 내장 훅은 system 메시지를 따로 못 넣는 경우가 많아 프롬프트 한 덩어리로 쓴다.
+ENGINE_VISION_PROMPT = VISION_SYSTEM + "\n\n" + VISION_PROMPT
+
+CAPTION_PROMPT = """\
+이 그림을 문서 맥락에서 쓸 수 있게 한국어로 설명하세요.
+- 무엇을 나타내는 그림인지 한 문장으로 먼저 씁니다.
+- 그림 안의 글자·숫자·축 이름·범례는 빠짐없이 옮깁니다.
+- 표·차트면 값을 읽어 정리합니다.
+- 보이지 않는 것을 지어내지 않습니다.
+- 설명문만 출력하고 머리말을 붙이지 않습니다."""
 
 JUDGE_SYSTEM = "당신은 문서 변환 품질 심사관입니다. 근거를 들어 냉정하게 채점합니다."
 

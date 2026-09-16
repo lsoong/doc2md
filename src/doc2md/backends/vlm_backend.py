@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from ..llm import VISION_PROMPT, VISION_SYSTEM, ImagePart, LLMClient
-from .base import Backend, BackendUnavailable, ConversionResult
+from .base import Backend, BackendUnavailable, ConversionResult, LLMHook, strip_fence
 
 # PDF 가 아닌 포맷은 PDF 로 바꾼 뒤 렌더링해야 한다.
 OFFICE_EXTS = (".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls")
@@ -27,6 +27,14 @@ class VLMBackend(Backend):
     priority = 50
     requires = ("pymupdf",)
     needs_llm = True
+    llm_hooks = (
+        LLMHook(
+            "page",
+            "페이지를 이미지로 렌더링해 사내 비전 모델이 통째로 읽는다 (엔진 자체가 LLM)",
+            role="vision",
+            default=True,
+        ),
+    )
 
     def convert(self, path: Path) -> ConversionResult:
         try:
@@ -55,7 +63,7 @@ class VLMBackend(Backend):
 
         parts: list[str] = []
         with LLMClient(self.cfg.llm) as client:
-            model = self.cfg.llm.effective_vision_model
+            model = self.llm_model_for(self.resolve_hook())
             for page_no, data, media_type in page_images:
                 text = client.complete(
                     VISION_PROMPT,
@@ -63,7 +71,7 @@ class VLMBackend(Backend):
                     images=[ImagePart(data=data, media_type=media_type)],
                     model=model,
                 )
-                parts.append(_strip_fence(text).strip())
+                parts.append(strip_fence(text).strip())
 
         markdown = "\n\n".join(p for p in parts if p)
         return self._result(
@@ -82,19 +90,3 @@ def _media_type(suffix: str) -> str:
         ".jpeg": "image/jpeg",
         ".tiff": "image/tiff",
     }.get(suffix, "image/png")
-
-
-def _strip_fence(text: str) -> str:
-    """모델이 결과 전체를 ```markdown 펜스로 감싸는 경우를 벗겨낸다."""
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return text
-    lines = stripped.splitlines()
-    if len(lines) < 2:
-        return text
-    first = lines[0].strip().lstrip("`").strip().lower()
-    if first not in {"", "markdown", "md"}:
-        return text
-    if lines[-1].strip() != "```":
-        return text
-    return "\n".join(lines[1:-1])
