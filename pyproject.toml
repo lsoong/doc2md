@@ -3,6 +3,7 @@ name = "doc2md"
 version = "0.1.0"
 description = "PDF·Word·PPT·Excel 문서를 Markdown으로 변환하는 멀티 엔진 CLI (사내 LLM 게이트웨이 연동)"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12",
@@ -29,6 +30,9 @@ all = [
     "docling>=2.0",
     "pymupdf>=1.24",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lsoong/doc2md"
 
 [project.scripts]
 doc2md = "doc2md.cli:app"

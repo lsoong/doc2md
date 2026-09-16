@@ -9,6 +9,7 @@ PDF·Word·PowerPoint·Excel 문서를 Markdown 으로 변환하는 CLI.
 ## 설치
 
 ```bash
+git clone https://github.com/lsoong/doc2md.git && cd doc2md
 uv venv .venv && source .venv/bin/activate
 uv pip install -e '.[basic]'        # markitdown + pymupdf4llm (가볍다)
 uv pip install -e '.[all]'          # + docling (권장, torch 포함 ~2GB)
@@ -196,3 +197,10 @@ DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
   문제없지만 외부 배포 제품에 넣으려면 검토가 필요하다. 기본 설치는 MIT 계열만 쓴다.
 - **사외 SaaS 파서(LlamaParse·Mathpix 등)는 의도적으로 넣지 않았다.** 사내 문서가 외부로
   나가기 때문이다.
+- **이 저장소는 공개 저장소다.** 게이트웨이 주소·API 키 같은 사내 정보는 설정파일이나
+  환경변수(`DOC2MD_BASE_URL`, `DOC2MD_API_KEY`)로만 넣고, 커밋하지 않는다.
+
+## 라이선스
+
+이 저장소의 코드는 MIT([LICENSE](LICENSE)). 선택 설치하는 변환 엔진들은 각자의 라이선스를
+따른다(위 "알아 둘 것" 참고).
