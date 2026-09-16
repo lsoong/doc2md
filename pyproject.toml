@@ -1,0 +1,41 @@
+[project]
+name = "doc2md"
+version = "0.1.0"
+description = "PDF·Word·PPT·Excel 문서를 Markdown으로 변환하는 멀티 엔진 CLI (사내 LLM 게이트웨이 연동)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# 기본 엔진 — 가볍고 의존성이 적다. 설치를 권장한다.
+basic = [
+    "markitdown[all]>=0.1.1",
+    "pymupdf4llm>=0.0.17",
+]
+# 고정확도 엔진 — torch 등 무거운 의존성이 딸려온다.
+docling = ["docling>=2.0"]
+marker = ["marker-pdf>=1.6"]
+mineru = ["mineru[core]>=2.0"]
+# VLM(비전 모델) 엔진 — 페이지를 이미지로 렌더링하려면 PyMuPDF가 필요하다.
+vlm = ["pymupdf>=1.24"]
+all = [
+    "markitdown[all]>=0.1.1",
+    "pymupdf4llm>=0.0.17",
+    "docling>=2.0",
+    "pymupdf>=1.24",
+]
+
+[project.scripts]
+doc2md = "doc2md.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doc2md"]
