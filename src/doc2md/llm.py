@@ -1,8 +1,11 @@
 """사내 LLM 게이트웨이 클라이언트.
 
-OpenAI 호환(vLLM·LiteLLM·Ollama·대부분의 사내 게이트웨이)과 Anthropic Messages
-호환 두 방언을 지원한다. SDK 의존 없이 httpx 로 직접 호출해 사내망 프록시·사설
-인증서 환경에서도 문제가 없게 했다.
+사내에 자체 서빙한 OpenAI 호환 엔드포인트(vLLM·SGLang·Ollama·TGI·LiteLLM 등)만
+호출한다. SDK 의존 없이 httpx 로 직접 호출해 사내망 프록시·사설 인증서 환경에서도
+문제가 없게 했다.
+
+외부 상용 API(OpenAI·Anthropic 등) 연결은 지원하지 않는다 — 주소 검사는
+config.ensure_self_hosted() 가 한다.
 """
 
 from __future__ import annotations
@@ -40,11 +43,7 @@ class LLMClient:
     # ---------------------------------------------------------------- 내부
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", **self.cfg.extra_headers}
-        if self.cfg.api == "anthropic":
-            headers["anthropic-version"] = "2023-06-01"
-            if self.cfg.api_key:
-                headers["x-api-key"] = self.cfg.api_key
-        elif self.cfg.api_key:
+        if self.cfg.api_key:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         return headers
 
@@ -70,7 +69,7 @@ class LLMClient:
     # ---------------------------------------------------------------- 공개 API
     def list_models(self) -> list[str]:
         """게이트웨이가 제공하는 모델 목록. 사용자가 고를 수 있게 하기 위한 것."""
-        path = "/models" if self.cfg.api == "openai" else "/v1/models"
+        path = "/models"
         try:
             resp = self._client.get(self._url(path), headers=self._headers())
         except httpx.HTTPError as exc:
@@ -92,8 +91,6 @@ class LLMClient:
         """텍스트(+이미지) 한 턴 요청. 응답 본문 문자열을 돌려준다."""
         model = model or self.cfg.model
         max_tokens = max_tokens or self.cfg.max_tokens
-        if self.cfg.api == "anthropic":
-            return self._complete_anthropic(prompt, system, images, model, max_tokens)
         return self._complete_openai(prompt, system, images, model, max_tokens)
 
     def chat(
@@ -106,21 +103,9 @@ class LLMClient:
         """OpenAI 형식 messages 를 그대로 받는 저수준 호출.
 
         엔진 내장 LLM 훅에 게이트웨이를 끼워 넣을 때(OpenAICompatClient) 쓴다.
-        게이트웨이가 Anthropic 방언이면 여기서 형식을 바꿔 준다.
         """
         model = model or self.cfg.model
         max_tokens = max_tokens or self.cfg.max_tokens
-        if self.cfg.api == "anthropic":
-            system, converted = _openai_to_anthropic(messages)
-            payload: dict = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": self.cfg.temperature,
-                "messages": converted,
-            }
-            if system:
-                payload["system"] = system
-            return self._text_from_anthropic(self._post("/v1/messages", payload))
         payload = {
             "model": model,
             "messages": messages,
@@ -165,46 +150,6 @@ class LLMClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"예상치 못한 응답 형식: {json.dumps(data)[:300]}") from exc
 
-    @staticmethod
-    def _text_from_anthropic(data: dict) -> str:
-        try:
-            return "".join(
-                block.get("text", "") for block in data["content"] if block.get("type") == "text"
-            )
-        except (KeyError, TypeError) as exc:
-            raise LLMError(f"예상치 못한 응답 형식: {json.dumps(data)[:300]}") from exc
-
-    def _complete_anthropic(
-        self,
-        prompt: str,
-        system: str | None,
-        images: list[ImagePart] | None,
-        model: str,
-        max_tokens: int,
-    ) -> str:
-        blocks: list[dict] = []
-        for img in images or []:
-            blocks.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": img.media_type,
-                        "data": base64.b64encode(img.data).decode(),
-                    },
-                }
-            )
-        blocks.append({"type": "text", "text": prompt})
-        payload: dict = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": self.cfg.temperature,
-            "messages": [{"role": "user", "content": blocks}],
-        }
-        if system:
-            payload["system"] = system
-        return self._text_from_anthropic(self._post("/v1/messages", payload))
-
     def close(self) -> None:
         self._client.close()
 
@@ -218,65 +163,11 @@ class LLMClient:
 # --------------------------------------------------- OpenAI SDK 흉내(엔진 훅용)
 
 def auth_headers(cfg: LLMConfig) -> dict[str, str]:
-    """엔진(docling 등)이 직접 HTTP 를 칠 때 그대로 넘겨 줄 인증 헤더.
-
-    엔진 내장 훅은 OpenAI 호환 엔드포인트만 부르므로 Bearer 로 통일한다.
-    """
+    """엔진(docling 등)이 직접 HTTP 를 칠 때 그대로 넘겨 줄 인증 헤더."""
     headers = dict(cfg.extra_headers)
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
     return headers
-
-
-def _openai_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
-    """OpenAI 형식 messages 를 Anthropic Messages 형식으로 옮긴다."""
-    system_parts: list[str] = []
-    converted: list[dict] = []
-    for message in messages:
-        role = message.get("role", "user")
-        content = message.get("content")
-        if role == "system":
-            system_parts.append(content if isinstance(content, str) else _flatten_text(content))
-            continue
-        if isinstance(content, str):
-            blocks: list[dict] = [{"type": "text", "text": content}]
-        else:
-            blocks = []
-            for part in content or []:
-                if part.get("type") == "text":
-                    blocks.append({"type": "text", "text": part.get("text", "")})
-                elif part.get("type") == "image_url":
-                    url = (part.get("image_url") or {}).get("url", "")
-                    media_type, data = _split_data_url(url)
-                    if data:
-                        blocks.append(
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": data,
-                                },
-                            }
-                        )
-        converted.append({"role": "assistant" if role == "assistant" else "user", "content": blocks})
-    return "\n\n".join(p for p in system_parts if p), converted
-
-
-def _flatten_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
-    return ""
-
-
-def _split_data_url(url: str) -> tuple[str, str]:
-    """data:image/png;base64,XXXX → ("image/png", "XXXX")."""
-    if not url.startswith("data:") or ";base64," not in url:
-        return "image/png", ""
-    head, data = url.split(";base64,", 1)
-    return head[len("data:") :] or "image/png", data
 
 
 @dataclass
@@ -320,7 +211,7 @@ class OpenAICompatClient:
 
     MarkItDown 처럼 "OpenAI 클라이언트 객체를 달라"고 하는 라이브러리에 사내
     게이트웨이를 끼워 넣기 위한 것이다. openai 패키지를 깔지 않아도 되고,
-    Anthropic 방언 게이트웨이도 그대로 받는다.
+    호출은 항상 사내 게이트웨이로만 나간다.
     """
 
     def __init__(self, client: LLMClient) -> None:

@@ -10,8 +10,8 @@
   picture  본문·표는 docling 이 읽고, 그림에만 사내 모델의 설명을 붙인다. 표 정확도는
            docling 그대로 두면서 차트·도식 내용을 살리고 싶을 때 쓴다.
 
-둘 다 docling 이 OpenAI 호환 /chat/completions 를 직접 호출한다. 사내 게이트웨이가
-Anthropic 방언뿐이면 [llm] openai_base_url 을 따로 지정해야 한다.
+둘 다 docling 이 OpenAI 호환 /chat/completions 를 직접 호출한다. 주소는 [llm] base_url
+하나이며, 사내 자체 서빙 엔드포인트가 아니면 호출 전에 거부된다.
 """
 
 from __future__ import annotations

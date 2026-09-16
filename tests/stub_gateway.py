@@ -1,7 +1,7 @@
 """사내 게이트웨이 흉내를 내는 로컬 HTTP 서버 (테스트·데모용).
 
 사내망 접속 없이 --refine, vlm 엔진, --judge 경로를 그대로 굴려 볼 수 있다.
-OpenAI 호환(/models, /chat/completions)과 Anthropic 호환(/v1/messages)을 모두 받는다.
+사내 자체 서빙 모델과 같은 OpenAI 호환 API(/models, /chat/completions)만 받는다.
 
 단독 실행:
     python tests/stub_gateway.py 8777
@@ -66,19 +66,6 @@ class Handler(BaseHTTPRequestHandler):
                         "completion_tokens": len(text),
                         "total_tokens": len(text) + 1,
                     },
-                }
-            )
-            return
-        if self.path.endswith("/messages"):
-            self._send(
-                {
-                    "id": "msg-stub",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "## 정제됨(anthropic)"}],
-                    "model": payload.get("model"),
-                    "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             )
             return

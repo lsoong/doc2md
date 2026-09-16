@@ -15,6 +15,9 @@ doc2md 가 어떤 엔진을 왜 골랐는지 기록. SYA-31 산출물.
 | **Pandoc** | GPL-2.0 | 문서 모델 변환 | ✕ | ○(docx) | PDF 입력 불가, pptx/xlsx 미지원 |
 | **LlamaParse / Mathpix** | 상용 SaaS | 클라우드 | ◎ | ○ | **문서가 사외로 나감 → 사내 문서엔 부적합** |
 
+> 모델 연결 방침(2026-09-16): 변환 엔진이든 LLM 이든 **사내에서 자체 서빙하는 것만** 쓴다.
+> 토큰당 과금되는 외부 모델(GPT·Claude·Gemini 등) 연결 경로는 코드에서 제거·차단했다.
+
 ## 2. 정확도 근거
 
 OmniDocBench(CVPR 2025, 1,651페이지 / 10개 문서 유형 / 다국어)가 사실상 표준 벤치마크다.
@@ -59,8 +62,15 @@ LlamaParse·Mathpix(사외 전송 — 사내 문서 반출 금지).
 3. **`compare --judge`** — 엔진별 결과를 사내 모델이 채점해 순위를 매긴다. 문서 유형별로
    어떤 엔진을 표준으로 삼을지 정할 때 쓴다.
 
-게이트웨이 방언은 OpenAI 호환(vLLM·LiteLLM·Ollama)과 Anthropic Messages 두 가지를 지원한다.
-SDK 를 쓰지 않고 httpx 로 직접 호출해 사내 프록시·사설 인증서 환경에서 문제를 줄였다.
+**연결 대상은 사내에서 자체 서빙하는 모델뿐이다**(2026-09-16 방침 확정). 지원 방언은 OpenAI
+호환 하나로 좁혔다 — vLLM·SGLang·Ollama·TGI·LiteLLM 등 자체 서빙 스택이 전부 이 형식을
+내주기 때문이다. SDK 를 쓰지 않고 httpx 로 직접 호출해 사내 프록시·사설 인증서 환경에서
+문제를 줄였다.
+
+토큰당 과금되는 외부 API(OpenAI·Anthropic·Gemini·Bedrock·OpenRouter 등)는 주소 검사
+(`config.ensure_self_hosted`)로 호출 전에 막고, marker 처럼 상용 서비스 구현을 내장한
+엔진은 OpenAI 호환 서비스만 허용한다. 초기 구현에 있던 Anthropic Messages 방언은 사실상
+Claude API 로 이어지는 통로라 통째로 들어냈다.
 
 ## 5. 엔진에 내장된 LLM 연결 (`--engine-llm`, 2026-09 추가)
 
@@ -81,9 +91,12 @@ SDK 를 쓰지 않고 httpx 로 직접 호출해 사내 프록시·사설 인증
 
 - **MarkItDown 은 OpenAI 클라이언트 "객체"를 요구**하지만 실제로 쓰는 건
   `client.chat.completions.create` 하나뿐이다. openai 패키지를 깔지 않고
-  `OpenAICompatClient` 로 흉내 내 사내 게이트웨이(Anthropic 방언 포함)에 물렸다.
-- **엔진이 직접 HTTP 를 치는 훅(docling·marker)은 OpenAI 호환만 받는다.** Anthropic 방언
-  게이트웨이만 있는 환경을 위해 `[llm] openai_base_url` 을 따로 뒀다.
+  `OpenAICompatClient` 로 흉내 내 사내 게이트웨이에 물렸다.
+- **엔진이 직접 HTTP 를 치는 훅(docling·marker)은 OpenAI 호환만 받는다.** 자체 서빙 스택이
+  모두 이 형식이라 `base_url` 하나로 통일했다.
+- **marker 의 LLM 서비스 목록에는 Gemini·Claude·Vertex 가 섞여 있다.** 기본값이 Gemini 라
+  그대로 쓰면 외부 과금 API 로 나간다. doc2md 는 `OpenAIService` 만 허용하고 나머지는
+  설정 단계에서 거부한다.
 - **docling 의 그림 설명 기본 임계값(`picture_area_threshold = 0.05`)이 작은 차트를 통째로
   건너뛴다.** 기본값을 0.02 로 낮추고 `picture_min_area` 옵션으로 열어 뒀다.
 - **MinerU 의 `vlm-http-client` 는 범용 챗 모델이 아니다.** MinerU2 전용 가중치를 올린

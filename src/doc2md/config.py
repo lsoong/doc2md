@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 try:  # pragma: no cover - 3.11+
     import tomllib
@@ -24,24 +26,69 @@ except ModuleNotFoundError:  # pragma: no cover - 3.10
 CONFIG_FILENAME = "doc2md.toml"
 USER_CONFIG_PATH = Path.home() / ".config" / "doc2md" / "config.toml"
 
+# 사내에서 자체 서빙하는 모델에만 붙인다. 아래는 토큰당 과금되는 상용 LLM API 라
+# 주소가 설정에 들어오면 호출 전에 막는다 (GPT·Claude 등 외부 모델 연결 금지).
+BLOCKED_HOST_PATTERNS: tuple[str, ...] = (
+    r"(^|\.)openai\.com$",
+    r"(^|\.)openai\.azure\.com$",
+    r"(^|\.)cognitiveservices\.azure\.com$",
+    r"(^|\.)services\.ai\.azure\.com$",
+    r"(^|\.)anthropic\.com$",
+    r"(^|\.)googleapis\.com$",
+    r"(^|\.)mistral\.ai$",
+    r"(^|\.)cohere\.(ai|com)$",
+    r"(^|\.)groq\.com$",
+    r"(^|\.)deepseek\.com$",
+    r"(^|\.)together\.(ai|xyz)$",
+    r"(^|\.)fireworks\.ai$",
+    r"(^|\.)openrouter\.ai$",
+    r"(^|\.)perplexity\.ai$",
+    r"(^|\.)x\.ai$",
+    r"(^|\.)replicate\.com$",
+    r"(^|\.)huggingface\.co$",
+    r"(^|\.)dashscope\.aliyuncs\.com$",
+    r"(^|\.)moonshot\.cn$",
+    r"(^|\.)upstage\.ai$",
+    r"(^|\.)ntruss\.com$",          # 네이버 클로바 스튜디오
+    r"^bedrock[^.]*\.[^.]+\.amazonaws\.com$",
+)
+
+_BLOCKED_HOSTS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in BLOCKED_HOST_PATTERNS)
+
+
+def is_external_llm_host(url: str) -> bool:
+    """주소가 과금되는 상용 LLM API 를 가리키는가."""
+    host = urlsplit(url if "//" in url else f"//{url}").hostname or ""
+    return any(pattern.search(host) for pattern in _BLOCKED_HOSTS)
+
+
+def ensure_self_hosted(url: str, what: str) -> None:
+    """사내 자체 서빙 엔드포인트가 아니면 막는다."""
+    if not url or not is_external_llm_host(url):
+        return
+    host = urlsplit(url if "//" in url else f"//{url}").hostname or url
+    raise ConfigError(
+        f"{what} 가 외부 상용 LLM API 를 가리킵니다: {host}\n"
+        "  doc2md 는 사내에서 자체 서빙하는 모델만 연결합니다 "
+        "(GPT·Claude 등 과금되는 외부 모델 연결 금지).\n"
+        "  vLLM·SGLang·Ollama·TGI·LiteLLM 등으로 띄운 사내 OpenAI 호환 주소를 지정하세요."
+    )
+
 
 @dataclass
 class LLMConfig:
-    """사내 LLM 게이트웨이 접속 설정."""
+    """사내 LLM 게이트웨이 접속 설정.
 
-    # openai: OpenAI 호환(vLLM·LiteLLM·Ollama·사내 게이트웨이 대부분)
-    # anthropic: Anthropic Messages API 호환 게이트웨이
-    api: str = "openai"
+    사내에 자체 서빙한 OpenAI 호환 엔드포인트(vLLM·SGLang·Ollama·TGI·LiteLLM 등)만
+    지원한다. 외부 상용 API 주소는 ensure_self_hosted() 에서 막는다.
+    """
+
     base_url: str = ""
     api_key: str = ""
     # 텍스트 정제(refine)에 쓸 기본 모델
     model: str = ""
     # 페이지 이미지를 읽을 비전 모델. 비우면 model 을 그대로 쓴다.
     vision_model: str = ""
-    # 엔진 내장 LLM 훅(docling·marker·markitdown)은 OpenAI 호환 엔드포인트만 받는다.
-    # api = "anthropic" 인 게이트웨이를 쓰면서 엔진 훅도 쓰려면 여기에 OpenAI 호환
-    # 주소를 따로 적는다. 비우면 base_url 을 그대로 쓴다.
-    openai_base_url: str = ""
     timeout: float = 180.0
     max_tokens: int = 8192
     temperature: float = 0.0
@@ -51,21 +98,6 @@ class LLMConfig:
     @property
     def effective_vision_model(self) -> str:
         return self.vision_model or self.model
-
-    @property
-    def effective_openai_base_url(self) -> str:
-        """엔진 내장 훅이 쓸 OpenAI 호환 주소."""
-        return self.openai_base_url or (self.base_url if self.api == "openai" else "")
-
-    def require_openai_endpoint(self, who: str) -> None:
-        """엔진 내장 LLM 훅은 OpenAI 호환 엔드포인트가 필요하다."""
-        if not self.effective_openai_base_url:
-            raise ConfigError(
-                f"{who} 의 내장 LLM 연결은 OpenAI 호환 엔드포인트가 필요합니다.\n"
-                "  현재 api = \"anthropic\" 입니다. 설정파일 [llm] 에 "
-                "openai_base_url = \"https://.../v1\" 을 추가하거나,\n"
-                "  --refine(후처리 정제) 또는 -e vlm(사내 비전 모델 엔진)을 쓰세요."
-            )
 
     def require(self) -> None:
         """LLM 호출 전 필수 설정 검증."""
@@ -77,6 +109,7 @@ class LLMConfig:
                 + "\n  doc2md config init 으로 설정파일을 만들거나 "
                 "DOC2MD_BASE_URL / DOC2MD_MODEL 환경변수를 지정하세요."
             )
+        ensure_self_hosted(self.base_url, "llm.base_url")
 
 
 @dataclass
@@ -126,8 +159,21 @@ def load_config(explicit: str | os.PathLike[str] | None = None) -> Config:
     return cfg
 
 
+# 지원을 끊은 키 → 안내 문구. 예전 설정파일을 그대로 쓰면 이유를 알려 준다.
+REMOVED_LLM_KEYS = {
+    "api": (
+        "api 키는 없어졌습니다. doc2md 는 OpenAI 호환 사내 엔드포인트만 지원합니다 "
+        "(Anthropic 방언은 외부 상용 Claude API 로 이어질 수 있어 제거했습니다)."
+    ),
+    "openai_base_url": "openai_base_url 은 없어졌습니다. base_url 하나만 쓰세요.",
+}
+
+
 def _from_mapping(raw: dict[str, Any]) -> Config:
     llm_raw = dict(raw.get("llm") or {})
+    for key, hint in REMOVED_LLM_KEYS.items():
+        if key in llm_raw:
+            raise ConfigError(f"[llm] {hint}")
     known = {f for f in LLMConfig.__dataclass_fields__}
     unknown = set(llm_raw) - known
     if unknown:
@@ -143,12 +189,10 @@ def _from_mapping(raw: dict[str, Any]) -> Config:
 def _apply_env(cfg: Config) -> None:
     env = os.environ
     mapping = {
-        "DOC2MD_API": "api",
         "DOC2MD_BASE_URL": "base_url",
         "DOC2MD_API_KEY": "api_key",
         "DOC2MD_MODEL": "model",
         "DOC2MD_VISION_MODEL": "vision_model",
-        "DOC2MD_OPENAI_BASE_URL": "openai_base_url",
     }
     for env_key, attr in mapping.items():
         value = env.get(env_key)
@@ -192,8 +236,8 @@ SAMPLE_CONFIG = """\
 default_engine = "auto"
 
 [llm]
-# 사내 게이트웨이가 OpenAI 호환이면 "openai", Anthropic 호환이면 "anthropic"
-api = "openai"
+# 사내에 자체 서빙한 OpenAI 호환 엔드포인트만 넣는다
+# (vLLM·SGLang·Ollama·TGI·LiteLLM 등). OpenAI·Anthropic 같은 과금 API 주소는 거부된다.
 base_url = "https://llm-gw.example.corp/v1"
 # 키를 파일에 직접 적지 말고 환경변수 참조를 쓴다: "env:변수명"
 api_key = "env:CORP_LLM_API_KEY"
@@ -203,9 +247,6 @@ vision_model = "qwen3-vl-32b"
 timeout = 180.0
 max_tokens = 8192
 temperature = 0.0
-# api = "anthropic" 게이트웨이를 쓰면서 엔진 내장 LLM 훅(docling/marker/markitdown)도
-# 쓰려면 OpenAI 호환 주소를 따로 적는다.
-# openai_base_url = "https://llm-gw.example.corp/v1"
 # 게이트웨이가 요구하는 추가 헤더가 있으면
 # extra_headers = { X-Dept = "AI" }
 
@@ -232,7 +273,9 @@ ocr = false
 [engines.marker]
 # use_llm = true         # 표 병합·수식 복원에 사내 모델을 쓴다 (marker 의 --use_llm)
 # llm_model = "qwen3-vl-32b"
-# llm_service = "marker.services.openai.OpenAIService"  # 기본값
+# llm_service 는 OpenAI 호환 서비스만 허용한다(기본값).
+# Gemini·Claude·Vertex 등 marker 의 상용 서비스는 거부된다.
+# llm_service = "marker.services.openai.OpenAIService"
 
 [engines.mineru]
 # use_llm = true

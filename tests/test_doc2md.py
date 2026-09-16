@@ -19,7 +19,14 @@ from doc2md.backends.docling_backend import (  # noqa: E402
     inject_picture_descriptions,
 )
 from doc2md.backends.marker_backend import marker_llm_config  # noqa: E402
-from doc2md.config import Config, ConfigError, LLMConfig, load_config  # noqa: E402
+from doc2md.config import (  # noqa: E402
+    Config,
+    ConfigError,
+    LLMConfig,
+    ensure_self_hosted,
+    is_external_llm_host,
+    load_config,
+)
 from doc2md.llm import LLMClient, OpenAICompatClient  # noqa: E402
 from doc2md.metrics import measure, table_health  # noqa: E402
 from doc2md.pipeline import (  # noqa: E402
@@ -34,8 +41,8 @@ from stub_gateway import MODELS, StubGateway  # noqa: E402
 SAMPLES = Path(__file__).parent / "samples"
 
 
-def gateway_config(base_url: str, api: str = "openai") -> Config:
-    return Config(llm=LLMConfig(api=api, base_url=base_url, model="corp-llm-32b", timeout=10))
+def gateway_config(base_url: str) -> Config:
+    return Config(llm=LLMConfig(base_url=base_url, model="corp-llm-32b", timeout=10))
 
 
 # ----------------------------------------------------------------- 지표
@@ -134,16 +141,52 @@ def test_refine_uses_explicit_model_override():
         assert gw.requests[-1]["payload"]["model"] == "corp-llm-8b"
 
 
-def test_anthropic_dialect_uses_messages_endpoint():
-    with StubGateway() as gw:
-        cfg = gateway_config(gw.base_url, api="anthropic")
-        cfg.llm.api_key = "k"
-        out = refine_markdown("본문", cfg=cfg)
-        assert "anthropic" in out
-        req = gw.requests[-1]
-        assert req["path"].endswith("/v1/messages")
-        assert req["headers"]["x-api-key"] == "k"
-        assert req["headers"]["anthropic-version"] == "2023-06-01"
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.openai.com/v1",
+        "https://api.anthropic.com",
+        "https://my-deploy.openai.azure.com/openai",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "https://openrouter.ai/api/v1",
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "api.mistral.ai/v1",
+    ],
+)
+def test_external_paid_endpoints_are_blocked(url):
+    """과금되는 외부 모델 API 는 호출 전에 막는다 (사내 자체 서빙 모델 전용)."""
+    assert is_external_llm_host(url)
+    cfg = Config(llm=LLMConfig(base_url=url, model="gpt-4o"))
+    with pytest.raises(ConfigError, match="외부 상용 LLM API"):
+        refine_markdown("본문", cfg=cfg)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000/v1",
+        "http://vllm.internal:8000/v1",
+        "https://llm-gw.example.corp/v1",
+        "http://ollama.사내:11434/v1",
+    ],
+)
+def test_self_hosted_endpoints_pass_the_guard(url):
+    assert not is_external_llm_host(url)
+    ensure_self_hosted(url, "테스트")
+
+
+def test_engine_hook_also_blocks_external_endpoint():
+    """엔진이 직접 HTTP 를 치는 경로(docling·marker·markitdown)도 같은 검사를 받는다."""
+    cfg = engine_llm_config("https://api.openai.com/v1", "markitdown")
+    with pytest.raises(ConfigError, match="외부 상용 LLM API"):
+        convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
+
+
+def test_removed_api_key_in_config_file_explains_itself(tmp_path):
+    path = tmp_path / "doc2md.toml"
+    path.write_text('[llm]\napi = "anthropic"\nbase_url = "https://gw/v1"\n', encoding="utf-8")
+    with pytest.raises(ConfigError, match="OpenAI 호환"):
+        load_config(path)
 
 
 def test_api_key_goes_in_bearer_header_for_openai():
@@ -257,33 +300,6 @@ def test_shim_client_speaks_openai_chat_api():
         assert gw.requests[-1]["payload"]["model"] == "corp-vl-32b"
 
 
-def test_shim_client_translates_images_for_anthropic_gateway():
-    with StubGateway() as gw:
-        with LLMClient(gateway_config(gw.base_url, api="anthropic").llm) as client:
-            OpenAICompatClient(client).chat.completions.create(
-                model="corp-vl-32b",
-                messages=[
-                    {"role": "system", "content": "지시"},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "설명해"},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": "data:image/png;base64,QUJD"},
-                            },
-                        ],
-                    },
-                ],
-            )
-        req = gw.requests[-1]
-        assert req["path"].endswith("/v1/messages")
-        assert req["payload"]["system"] == "지시"
-        blocks = req["payload"]["messages"][0]["content"]
-        assert [b["type"] for b in blocks] == ["text", "image"]
-        assert blocks[1]["source"]["data"] == "QUJD"
-
-
 @pytest.mark.skipif(not (SAMPLES / "sample.png").exists(), reason="이미지 샘플 없음")
 def test_markitdown_caption_hook_sends_image_to_vision_model():
     pytest.importorskip("markitdown")
@@ -321,17 +337,24 @@ def test_unknown_llm_mode_is_rejected():
         convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
 
 
-def test_anthropic_gateway_needs_openai_url_for_engine_hooks():
-    cfg = engine_llm_config("https://gw.example/anthropic", "markitdown")
-    cfg.llm.api = "anthropic"
-    with pytest.raises(ConfigError, match="openai_base_url"):
-        convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
-    # openai_base_url 을 채우면 그 주소로 붙는다
-    with StubGateway() as gw:
-        cfg.llm.openai_base_url = gw.base_url
-        result = convert_file(SAMPLES / "sample.png", engine="markitdown", cfg=cfg)
-        assert result.engine_llm == "caption"
-        assert gw.requests[-1]["path"].endswith("/chat/completions")
+@pytest.mark.parametrize(
+    "service",
+    [
+        "marker.services.claude.ClaudeService",
+        "marker.services.gemini.GoogleGeminiService",
+        "marker.services.vertex.GoogleVertexService",
+        "marker.services.azure_openai.AzureOpenAIService",
+    ],
+)
+def test_marker_rejects_commercial_llm_services(service):
+    """marker 에 딸려 오는 상용 API 서비스는 쓰지 못하게 막는다."""
+    with pytest.raises(ConfigError, match="사내 게이트웨이용만"):
+        marker_llm_config(
+            base_url="http://vllm.internal:8000/v1",
+            model="qwen3-vl-32b",
+            api_key="",
+            service=service,
+        )
 
 
 def test_engine_without_hook_falls_back_to_refine():
@@ -456,6 +479,19 @@ def test_mineru_vlm_backend_requires_server_url(tmp_path):
     cfg.engine_options["mineru"] = {"use_llm": True}
     backend = MinerUBackend(cfg)
     with pytest.raises(ConfigError, match="서버 주소"):
+        backend.build_command("mineru", tmp_path / "a.pdf", tmp_path, "vlm-http-client")
+
+
+def test_mineru_server_url_cannot_point_outside(tmp_path):
+    from doc2md.backends.mineru_backend import MinerUBackend
+
+    cfg = Config()
+    cfg.engine_options["mineru"] = {
+        "use_llm": True,
+        "server_url": "https://api.openai.com/v1",
+    }
+    backend = MinerUBackend(cfg)
+    with pytest.raises(ConfigError, match="외부 상용 LLM API"):
         backend.build_command("mineru", tmp_path / "a.pdf", tmp_path, "vlm-http-client")
 
 

@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..config import ConfigError
+from ..config import ConfigError, ensure_self_hosted
 from .base import Backend, BackendUnavailable, ConversionResult, LLMHook
 
 
@@ -99,6 +99,7 @@ class MinerUBackend(Backend):
                     "  (사내 챗 게이트웨이 주소가 아닙니다 — 범용 비전 모델을 쓰려면 "
                     "docling --llm-mode vlm 또는 -e vlm 을 쓰세요.)"
                 )
+            ensure_self_hosted(url, "MinerU VLM 서버 주소(server_url)")
             cmd += ["-u", url]
         lang = self.option("lang")
         if lang:

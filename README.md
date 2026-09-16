@@ -1,8 +1,13 @@
 # doc2md
 
 PDF·Word·PowerPoint·Excel 문서를 Markdown 으로 변환하는 CLI.
-변환 엔진을 **옵션으로 바꿔 가며** 쓸 수 있고, **사내 LLM 게이트웨이**에 붙여 결과를 다듬거나
-비전 모델로 직접 읽을 수 있다.
+변환 엔진을 **옵션으로 바꿔 가며** 쓸 수 있고, **사내에서 자체 서빙하는 LLM**에 붙여 결과를
+다듬거나 비전 모델로 직접 읽을 수 있다.
+
+> **연결 대상은 사내 자체 서빙 모델뿐이다.** 토큰당 과금되는 외부 API(OpenAI·Anthropic·
+> Gemini·Bedrock·OpenRouter 등)로 나가는 경로는 넣지 않았고, 설정에 그런 주소가 들어오면
+> 호출 전에 막는다. 게이트웨이는 vLLM·SGLang·Ollama·TGI·LiteLLM 같은 **OpenAI 호환**
+> 엔드포인트를 쓴다.
 
 엔진 선정 근거와 벤치마크 출처는 [docs/engine-research.md](docs/engine-research.md).
 
@@ -31,12 +36,13 @@ doc2md engines -f pdf   # pdf 를 지원하는 엔진만
 | `mineru` | 정확도 최상위(OmniDocBench), 수식·복잡 표 | pdf, 이미지 | `vlm-http-client` / `vlm-transformers` | AGPL, 무겁다 |
 | `docling` | PDF·Office 를 한 파이프라인으로, MIT | pdf docx pptx xlsx html 이미지 | `vlm` / `picture` | **기본 주력** |
 | `marker` | 배치 처리량, 수식·코드 | pdf docx pptx xlsx epub | `refine` | GPL+상용조항 |
-| `vlm` | 스캔본·도장·수기 주석. 사내 비전 모델이 직접 읽는다 | pdf, 이미지 | `page` (엔진 자체가 LLM) | 페이지당 과금 |
+| `vlm` | 스캔본·도장·수기 주석. 사내 비전 모델이 직접 읽는다 | pdf, 이미지 | `page` (엔진 자체가 LLM) | 페이지당 GPU 시간 |
 | `pymupdf4llm` | 압도적으로 빠름(텍스트 레이어 PDF) | pdf epub 등 | — (`--refine` 으로 대체) | AGPL |
 | `markitdown` | 포맷 커버리지 최광, 폴백 | 거의 모든 포맷 | `caption` | PDF 구조 보존 약함 |
 
 `--engine auto`(기본)는 **포맷을 지원하는 설치된 엔진 중 우선순위가 가장 높은 것**을 고른다.
-과금되는 `vlm` 은 자동 선택에서 제외되므로 쓰려면 명시해야 한다.
+페이지마다 모델을 태우는 `vlm` 은 사내 GPU 를 오래 쓰므로 자동 선택에서 제외된다 — 쓰려면
+명시해야 한다.
 
 ## 사용법
 
@@ -70,7 +76,7 @@ doc2md convert 스캔본.pdf -e vlm -m corp-vl-32b      # 비전 모델로 직�
 default_engine = "auto"
 
 [llm]
-api = "openai"                        # 또는 "anthropic"
+# 사내 자체 서빙 OpenAI 호환 엔드포인트 (vLLM·SGLang·Ollama·TGI·LiteLLM 등)
 base_url = "https://llm-gw.example.corp/v1"
 api_key = "env:CORP_LLM_API_KEY"      # 키는 파일에 직접 적지 말고 환경변수 참조
 model = "corp-llm-32b"
@@ -88,8 +94,10 @@ max_pages = 0                         # 0 = 제한 없음
 ```
 
 환경변수로도 덮어쓸 수 있다(설정파일보다 우선):
-`DOC2MD_BASE_URL`, `DOC2MD_API_KEY`, `DOC2MD_MODEL`, `DOC2MD_VISION_MODEL`, `DOC2MD_API`,
-`DOC2MD_OPENAI_BASE_URL`, `DOC2MD_ENGINE`, `DOC2MD_CONFIG`.
+`DOC2MD_BASE_URL`, `DOC2MD_API_KEY`, `DOC2MD_MODEL`, `DOC2MD_VISION_MODEL`, `DOC2MD_ENGINE`,
+`DOC2MD_CONFIG`.
+
+지금 설정이 어디를 보고 있는지는 `doc2md config show` 의 "엔드포인트 검사" 줄로 확인한다.
 
 `--refine` 은 결과를 조각내서 사내 모델에 보내 깨진 표 복원·잘린 줄 병합·쪽번호 제거를 시킨다.
 프롬프트가 "내용을 만들어내지 말 것"을 강제하지만, **모델이 손댄 결과이므로 중요한 문서는**
@@ -129,9 +137,10 @@ doc2md convert 보고서.pdf -e docling -L --refine --pick-model
   띄워 번호로 고르게 하고, `-L` 과 같이 쓰면 비전 모델까지 물어본다.
 - **`-e auto` + `-L`**: 어떤 엔진이 뽑힐지 모르므로 사내 게이트웨이에 바로 붙는 엔진만
   켠다. 뽑힌 엔진에 내장 연결이 없으면 경고와 함께 `--refine` 으로 대체한다.
-- **게이트웨이 방언**: 엔진 내장 훅은 엔진 쪽 코드가 직접 HTTP 를 치므로 **OpenAI 호환
-  엔드포인트**만 받는다. `api = "anthropic"` 게이트웨이를 쓴다면 `[llm] openai_base_url` 을
-  따로 지정하거나, `--refine` / `-e vlm`(둘 다 doc2md 가 직접 호출) 을 쓴다.
+- **게이트웨이 형식**: 엔진 내장 훅은 엔진 쪽 코드가 직접 HTTP 를 치므로 **OpenAI 호환
+  엔드포인트**만 받는다. 자체 서빙 스택은 모두 이 형식을 내주므로 `base_url` 하나면 된다.
+- **marker 의 LLM 서비스**: marker 는 Gemini·Claude·Vertex 서비스도 갖고 있지만 전부 과금
+  되는 외부 API 라 막아 뒀다. 사내 게이트웨이를 보는 `OpenAIService`(기본값)만 쓴다.
 - **MinerU 만 예외**: MinerU 의 VLM 백엔드는 범용 챗 모델이 아니라 MinerU2 전용 가중치를
   올린 서버를 가리킨다. 사내 챗 게이트웨이 주소를 넣으면 안 된다.
 - 결과 줄에 `+LLM:vlm`, `+정제` 처럼 무엇이 붙었는지 표시된다.
@@ -166,7 +175,7 @@ doc2md compare 보고서.pdf --json          # 지표를 JSON 으로 (CI·집계
 
 ```bash
 python tests/make_samples.py tests/samples     # 한국어 샘플 docx/pptx/xlsx/pdf/png 생성
-python -m pytest tests -q                      # 테스트 (40개)
+python -m pytest tests -q                      # 테스트 (54개)
 python tests/stub_gateway.py 8777              # 사내 게이트웨이 흉내 서버
 DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
 ```
@@ -197,6 +206,10 @@ DOC2MD_BASE_URL=http://127.0.0.1:8777 DOC2MD_MODEL=corp-llm-32b doc2md models
   문제없지만 외부 배포 제품에 넣으려면 검토가 필요하다. 기본 설치는 MIT 계열만 쓴다.
 - **사외 SaaS 파서(LlamaParse·Mathpix 등)는 의도적으로 넣지 않았다.** 사내 문서가 외부로
   나가기 때문이다.
+- **외부 상용 LLM 연결도 같은 이유로 막혀 있다.** `api.openai.com`, `api.anthropic.com`,
+  `*.openai.azure.com`, `generativelanguage.googleapis.com`, `openrouter.ai`,
+  `bedrock-*.amazonaws.com` 등을 `base_url`·`server_url` 에 넣으면 실행 전에 거부된다.
+  차단 목록은 `src/doc2md/config.py` 의 `BLOCKED_HOST_PATTERNS`.
 - **이 저장소는 공개 저장소다.** 게이트웨이 주소·API 키 같은 사내 정보는 설정파일이나
   환경변수(`DOC2MD_BASE_URL`, `DOC2MD_API_KEY`)로만 넣고, 커밋하지 않는다.
 

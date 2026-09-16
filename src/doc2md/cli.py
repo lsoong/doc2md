@@ -30,6 +30,8 @@ from .config import (
     SAMPLE_CONFIG,
     USER_CONFIG_PATH,
     ConfigError,
+    ensure_self_hosted,
+    is_external_llm_host,
     load_config,
     override_llm,
     set_engine_options,
@@ -41,7 +43,10 @@ from .pipeline import collect_inputs, convert_file, output_stems, write_result
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="PDF·Word·PPT·Excel 문서를 Markdown 으로 변환합니다 (멀티 엔진 + 사내 LLM 연동).",
+    help=(
+        "PDF·Word·PPT·Excel 문서를 Markdown 으로 변환합니다 "
+        "(멀티 엔진 + 사내 자체 서빙 LLM 연동)."
+    ),
 )
 console = Console()
 err_console = Console(stderr=True)
@@ -54,7 +59,6 @@ def _fail(message: str) -> "typer.Exit":
 
 def _load(
     config: str | None,
-    api: str | None,
     base_url: str | None,
     model: str | None,
     vision_model: str | None = None,
@@ -63,9 +67,7 @@ def _load(
         cfg = load_config(config)
     except ConfigError as exc:
         raise _fail(str(exc)) from exc
-    return override_llm(
-        cfg, api=api, base_url=base_url, model=model, vision_model=vision_model
-    )
+    return override_llm(cfg, base_url=base_url, model=model, vision_model=vision_model)
 
 
 def _apply_engine_llm(
@@ -144,7 +146,8 @@ def engines(
         console.print(table)
         console.print(
             "모델은 --llm-model 로 고릅니다. 생략하면 vision_model(없으면 model)을 씁니다.\n"
-            "어느 엔진에도 붙지 않는 일반 정제는 --refine 입니다."
+            "어느 엔진에도 붙지 않는 일반 정제는 --refine 입니다.\n"
+            "[dim]연결 대상은 사내 자체 서빙 모델뿐입니다 — 과금되는 외부 API 주소는 거부됩니다.[/]"
         )
         return
 
@@ -180,11 +183,12 @@ def engines(
 @app.command()
 def models(
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
-    api: str = typer.Option(None, "--api", help="openai | anthropic"),
-    base_url: str = typer.Option(None, "--base-url", help="사내 게이트웨이 주소"),
+    base_url: str = typer.Option(
+        None, "--base-url", help="사내 게이트웨이 주소 (OpenAI 호환, 자체 서빙)"
+    ),
 ) -> None:
     """사내 게이트웨이가 제공하는 모델 목록을 조회한다."""
-    cfg = _load(config, api, base_url, None)
+    cfg = _load(config, base_url, None)
     if not cfg.llm.base_url:
         raise _fail("base_url 이 비어 있습니다. doc2md config init 으로 설정하세요.")
     try:
@@ -251,18 +255,25 @@ def convert(
     pick_model: bool = typer.Option(False, "--pick-model", help="모델을 대화식으로 고른다"),
     model: str = typer.Option(None, "--model", "-m", help="사내 모델 ID (정제용 기본 모델)"),
     vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
-    api: str = typer.Option(None, "--api", help="openai | anthropic"),
-    base_url: str = typer.Option(None, "--base-url", help="사내 게이트웨이 주소"),
+    base_url: str = typer.Option(
+        None, "--base-url", help="사내 게이트웨이 주소 (OpenAI 호환, 자체 서빙)"
+    ),
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
     no_images: bool = typer.Option(False, "--no-images", help="추출 이미지를 저장하지 않는다"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="진행 메시지를 감춘다"),
 ) -> None:
     """문서를 Markdown 으로 변환한다."""
-    cfg = _load(config, api, base_url, model, vision_model)
+    cfg = _load(config, base_url, model, vision_model)
     if pick_model:
         _pick_model(cfg, also_vision=engine_llm or engine == "vlm")
     if refine and not cfg.llm.model:
         raise _fail("--refine 에는 모델이 필요합니다. --model 또는 --pick-model 을 쓰세요.")
+    if refine or engine_llm:
+        # 변환을 다 돌린 뒤가 아니라 시작 전에 막는다.
+        try:
+            ensure_self_hosted(cfg.llm.base_url, "llm.base_url")
+        except ConfigError as exc:
+            raise _fail(str(exc)) from exc
     _apply_engine_llm(
         cfg,
         engine=engine,
@@ -334,13 +345,14 @@ def compare(
     llm_model: str = typer.Option(None, "--llm-model", help="엔진 내장 LLM 이 쓸 모델 ID"),
     model: str = typer.Option(None, "--model", "-m", help="심사에 쓸 사내 모델 ID"),
     vision_model: str = typer.Option(None, "--vision-model", help="이미지를 읽을 비전 모델 ID"),
-    api: str = typer.Option(None, "--api", help="openai | anthropic"),
-    base_url: str = typer.Option(None, "--base-url", help="사내 게이트웨이 주소"),
+    base_url: str = typer.Option(
+        None, "--base-url", help="사내 게이트웨이 주소 (OpenAI 호환, 자체 서빙)"
+    ),
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
     json_out: bool = typer.Option(False, "--json", help="지표를 JSON 으로 출력"),
 ) -> None:
     """같은 문서를 여러 엔진으로 변환해 결과를 비교한다."""
-    cfg = _load(config, api, base_url, model, vision_model)
+    cfg = _load(config, base_url, model, vision_model)
     if not path.is_file():
         raise _fail(f"파일이 없습니다: {path}")
 
@@ -481,20 +493,21 @@ def config_show(
     config: str = typer.Option(None, "--config", "-c", help="설정파일 경로"),
 ) -> None:
     """현재 적용되는 설정을 보여 준다 (API 키는 가린다)."""
-    cfg = _load(config, None, None, None)
+    cfg = _load(config, None, None)
     table = Table(title="현재 설정")
     table.add_column("항목", style="bold")
     table.add_column("값")
     table.add_row("설정파일", str(cfg.source_path or "(없음 — 환경변수/기본값만)"))
     table.add_row("default_engine", cfg.default_engine)
-    table.add_row("llm.api", cfg.llm.api)
     table.add_row("llm.base_url", cfg.llm.base_url or "[dim](미설정)[/]")
     table.add_row("llm.api_key", "설정됨" if cfg.llm.api_key else "[dim](미설정)[/]")
     table.add_row("llm.model", cfg.llm.model or "[dim](미설정)[/]")
     table.add_row("llm.vision_model", cfg.llm.effective_vision_model or "[dim](미설정)[/]")
     table.add_row(
-        "엔진 훅용 OpenAI 주소",
-        cfg.llm.effective_openai_base_url or "[yellow](없음 — 엔진 내장 LLM 을 못 씁니다)[/]",
+        "엔드포인트 검사",
+        "[red]외부 상용 API — 차단됨[/]"
+        if cfg.llm.base_url and is_external_llm_host(cfg.llm.base_url)
+        else "[green]사내 자체 서빙[/]",
     )
     for engine_name, options in cfg.engine_options.items():
         table.add_row(f"engines.{engine_name}", str(options))

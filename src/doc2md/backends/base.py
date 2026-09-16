@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..config import Config, ConfigError, LLMConfig
+from ..config import Config, ConfigError, LLMConfig, ensure_self_hosted
 
 
 @dataclass(frozen=True)
@@ -133,20 +133,27 @@ class Backend(ABC):
         return self.cfg.llm.model
 
     def gateway_for(self, hook: LLMHook) -> tuple[str, str]:
-        """게이트웨이를 직접 부르는 훅에 필요한 (OpenAI 호환 주소, 모델 ID)."""
-        self.cfg.llm.require_openai_endpoint(self.title)
+        """게이트웨이를 직접 부르는 훅에 필요한 (사내 OpenAI 호환 주소, 모델 ID)."""
+        url = self.cfg.llm.base_url.rstrip("/")
+        if not url:
+            raise ConfigError(
+                f"{self.title} 의 내장 LLM 연결에 쓸 사내 게이트웨이 주소가 없습니다.\n"
+                "  doc2md config init 으로 설정파일을 만들거나 --base-url 을 지정하세요."
+            )
+        # 엔진이 직접 HTTP 를 치는 경로라 여기서 한 번 더 막는다.
+        ensure_self_hosted(url, f"{self.title} 의 내장 LLM 주소")
         model = self.llm_model_for(hook)
         if not model:
             raise ConfigError(
                 f"{self.title} 의 내장 LLM 연결에 쓸 모델이 없습니다.\n"
                 "  --llm-model 로 지정하거나 설정파일 [llm] 의 model / vision_model 을 채우세요."
             )
-        return self.cfg.llm.effective_openai_base_url.rstrip("/"), model
+        return url, model
 
     def gateway_llm_config(self, hook: LLMHook) -> LLMConfig:
-        """엔진 훅이 쓸 LLM 설정. 항상 OpenAI 호환 주소·방언으로 맞춰 준다."""
+        """엔진 훅이 쓸 LLM 설정. 사내 게이트웨이 주소·모델로 맞춰 준다."""
         url, model = self.gateway_for(hook)
-        return replace(self.cfg.llm, api="openai", base_url=url, model=model)
+        return replace(self.cfg.llm, base_url=url, model=model)
 
     def _result(self, markdown: str, path: Path, **kwargs: Any) -> ConversionResult:
         return ConversionResult(markdown=markdown, engine=self.name, source=path, **kwargs)

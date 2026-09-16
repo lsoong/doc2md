@@ -5,9 +5,12 @@
 
 내장 LLM 연결: marker 의 `--use_llm`. 레이아웃 모델이 1차로 읽은 뒤, 애매한 표(쪽을
 넘어가는 표·병합 셀)·수식·서식을 LLM 이 고쳐 준다. 페이지 전체를 LLM 에 맡기지 않아
-비용 대비 정확도 개선이 크다. 붙일 서비스는 marker 의 LLMService 구현으로 고르는데,
-사내 게이트웨이가 OpenAI 호환이면 marker.services.openai.OpenAIService 를 쓴다
-(marker 쪽이 openai 패키지를 쓰므로 `pip install openai` 가 함께 필요하다).
+비용 대비 정확도 개선이 크다.
+
+marker 는 LLMService 구현으로 붙을 모델을 고르는데, 기본 제공 구현에는 Gemini·Claude·
+Vertex 처럼 과금되는 외부 API 로 나가는 것들이 섞여 있다. doc2md 는 사내 자체 서빙
+모델만 쓰므로 OpenAI 호환 서비스(= 사내 게이트웨이를 가리키는 OpenAIService)만
+허용한다. marker 쪽이 openai 패키지를 쓰므로 `pip install openai` 가 함께 필요하다.
 """
 
 from __future__ import annotations
@@ -15,12 +18,28 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ..config import ConfigError
 from .base import Backend, BackendUnavailable, ConversionResult, LLMHook
 
 # 모델 로딩이 수 초 걸리므로 프로세스 안에서 한 번만 만든다.
 _MODEL_CACHE: dict | None = None
 
 DEFAULT_LLM_SERVICE = "marker.services.openai.OpenAIService"
+# 사내 게이트웨이(OpenAI 호환)로만 나가는 서비스. 이 목록 밖은 거부한다.
+ALLOWED_LLM_SERVICES = frozenset({DEFAULT_LLM_SERVICE})
+
+
+def check_llm_service(service: str) -> str:
+    """marker 의 LLMService 가 사내 게이트웨이용인지 확인한다."""
+    if service in ALLOWED_LLM_SERVICES:
+        return service
+    raise ConfigError(
+        f"marker 의 llm_service 는 사내 게이트웨이용만 허용합니다: {service}\n"
+        "  doc2md 는 사내에서 자체 서빙하는 모델만 연결합니다 — marker 의 Gemini·Claude·"
+        "Vertex·Azure 서비스는 과금되는 외부 API 라 막혀 있습니다.\n"
+        f"  허용: {', '.join(sorted(ALLOWED_LLM_SERVICES))} (기본값이므로 llm_service 를 "
+        "비워 두면 됩니다)"
+    )
 
 
 class MarkerBackend(Backend):
@@ -67,7 +86,9 @@ class MarkerBackend(Backend):
                     base_url=url,
                     model=model,
                     api_key=self.cfg.llm.api_key,
-                    service=str(self.option("llm_service", "") or DEFAULT_LLM_SERVICE),
+                    service=check_llm_service(
+                        str(self.option("llm_service", "") or DEFAULT_LLM_SERVICE)
+                    ),
                 )
             )
             used_mode = hook.mode
@@ -124,16 +145,13 @@ def marker_llm_config(*, base_url: str, model: str, api_key: str, service: str) 
     marker 의 OpenAIService 는 openai SDK 를 그대로 쓰므로 base_url 은 /v1 루트를,
     api_key 는 빈 문자열이 아닌 값을 요구한다(인증이 없는 사내 게이트웨이면 아무 값).
     """
-    config: dict = {
+    return {
         "use_llm": True,
-        "llm_service": service,
+        "llm_service": check_llm_service(service),
         "openai_base_url": base_url,
         "openai_model": model,
         "openai_api_key": api_key or "no-key",
     }
-    if service.endswith("ClaudeService"):
-        config.update(claude_model_name=model, claude_api_key=api_key or "no-key")
-    return config
 
 
 def _pil_to_png(image: object) -> bytes | None:
